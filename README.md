@@ -12,11 +12,7 @@ rollups and tiering work and are tested on Postgres 17 and 18. Documentation for
 [docs.snoutdata.com/cloud/timeseries](https://docs.snoutdata.com/cloud/timeseries/overview); the
 rules every change follows are in `CONTRIBUTING.md`.
 
-It is developed in SnoutData's own repository and mirrored here, one commit for each upstream
-commit. Comments in the code cite `PLAN.md`, the project's internal plan: a decision number (D3),
-a phase (3.6) or a date points there, and is kept as written so the code stays the same on both
-sides. Issues and pull requests are welcome here; an accepted pull request is applied upstream
-with you as co-author and comes back through the mirror.
+Issues and pull requests are welcome.
 
 ## Time buckets
 
@@ -364,8 +360,7 @@ SQL regression tests are `tests/pg_regress/sql/<name>.sql` with the expected out
 
 ## Benchmarks
 
-The benchmark harness and its records are part of our research and are published with it, at
-[snoutdata.com/research](https://snoutdata.com/research), rather than kept in this repository.
+Benchmarks are published with our research at [snoutdata.com/research](https://snoutdata.com/research).
 
 ## License
 

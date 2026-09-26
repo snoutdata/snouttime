@@ -1,12 +1,7 @@
 # Contributing to SnoutTime
 
-These rules come from the project's plan (`PLAN.md`, kept in SnoutData's own repository) and
-are not up for debate in a pull request; changing one changes what the project is.
-
-**How a contribution lands.** SnoutTime is developed in SnoutData's repository and mirrored here.
-Open issues and pull requests here. An accepted pull request is applied upstream with you as
-`Co-authored-by:`, and the mirror brings it back, so it appears here as a new commit rather than
-a merge. Run `bash scripts/test.sh` before sending one; it needs only Docker or Podman.
+Issues and pull requests are welcome. Run `bash scripts/test.sh` before sending one; it needs
+only Docker or Podman. The rules below are what every change follows.
 
 ## R1: Clean room
 
@@ -31,9 +26,8 @@ fine where they are the obvious name.
 
 ## R3: Self-contained package
 
-This directory has its own `Cargo.toml` (not a workspace member of anything), its own build
-container, its own scripts, its own README, and no reference to any other path in SnoutData's
-repository, which is what lets it be mirrored here exactly as it is upstream.
+SnoutTime has its own `Cargo.toml` (not a workspace member of anything), its own build
+container, its own scripts and its own README, and depends on nothing outside this repository.
 
 ## R4: Every dependency must be compatible with MIT
 
