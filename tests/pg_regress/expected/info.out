@@ -1,0 +1,271 @@
+-- Phase 1.4 (a space key) and 1.5 (what is there and what it costs).
+SET client_min_messages = warning;
+SET timezone = 'UTC';
+CREATE TABLE i_metrics (ts timestamptz NOT NULL, host text NOT NULL, v float8);
+INSERT INTO i_metrics
+SELECT timestamptz '2021-05-01 00:00:00+00' + g * interval '6 hours', 'h' || (g % 4), g
+FROM generate_series(0, 11) AS g;
+SELECT snouttime.create_series('i_metrics', 'ts', partition_interval => '1 day', premake => 1,
+	space_column => 'host', space_partitions => 2);
+ create_series 
+---------------
+ i_metrics
+(1 row)
+
+CALL snouttime.migrate('i_metrics');
+-- Each day is itself split in two by the space key, and a row still finds its way down.
+SELECT name, state, range_start, range_end, children
+FROM snouttime.partition_info WHERE series = 'i_metrics'::regclass AND name LIKE '%2021%'
+ORDER BY name;
+        name         | state  |          range_start          |           range_end           | children 
+---------------------+--------+-------------------------------+-------------------------------+----------
+ i_metrics_p20210501 | spread | 2021-05-01T00:00:00.000000+00 | 2021-05-02T00:00:00.000000+00 |        2
+ i_metrics_p20210502 | spread | 2021-05-02T00:00:00.000000+00 | 2021-05-03T00:00:00.000000+00 |        2
+ i_metrics_p20210503 | spread | 2021-05-03T00:00:00.000000+00 | 2021-05-04T00:00:00.000000+00 |        2
+(3 rows)
+
+SELECT count(*) AS leaves FROM pg_class WHERE relname LIKE 'i\_metrics\_p2021%\_h%';
+ leaves 
+--------
+      6
+(1 row)
+
+SELECT count(*) AS rows_kept FROM i_metrics;
+ rows_kept 
+-----------
+        12
+(1 row)
+
+SELECT tableoid::regclass::text ~ '_h[01]$' AS in_a_hash_partition
+FROM i_metrics WHERE ts = '2021-05-01 06:00:00+00';
+ in_a_hash_partition 
+---------------------
+ t
+(1 row)
+
+-- The shape, without scanning anything.
+SET client_min_messages = warning;
+ANALYZE i_metrics;
+SELECT time_column, partition_size, space_column, space_partitions, partitions,
+	foreign_partitions, oldest_range,
+	-- premade around today, so as a distance from today: an absolute date made this test
+	-- fail on every day but the one its expected output was recorded on
+	newest_range::timestamptz - date_trunc('day', now()) AS newest_range_from_today,
+	rows_in_default, estimated_rows,
+	bytes > 0 AS has_bytes
+FROM snouttime.series_info WHERE series = 'i_metrics'::regclass;
+ time_column | partition_size | space_column | space_partitions | partitions | foreign_partitions |         oldest_range          | newest_range_from_today | rows_in_default | estimated_rows | has_bytes 
+-------------+----------------+--------------+------------------+------------+--------------------+-------------------------------+-------------------------+-----------------+----------------+-----------
+ ts          | @ 1 day        | host         |                2 |          5 |                  0 | 2021-05-01T00:00:00.000000+00 | @ 2 days                |               0 |             12 | t
+(1 row)
+
+-- A partition somebody else made is reported, and named as not ours.
+CREATE TABLE i_metrics_theirs PARTITION OF i_metrics
+	FOR VALUES FROM ('2019-01-01 00:00:00+00') TO ('2019-01-02 00:00:00+00')
+	PARTITION BY HASH (host);
+CREATE TABLE i_metrics_theirs_h0 PARTITION OF i_metrics_theirs
+	FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE i_metrics_theirs_h1 PARTITION OF i_metrics_theirs
+	FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+SELECT name, state FROM snouttime.partition_info
+WHERE series = 'i_metrics'::regclass AND name = 'i_metrics_theirs';
+       name       |  state  
+------------------+---------
+ i_metrics_theirs | foreign
+(1 row)
+
+SELECT foreign_partitions FROM snouttime.series_info WHERE series = 'i_metrics'::regclass;
+ foreign_partitions 
+--------------------
+                  1
+(1 row)
+
+-- Jobs, with what happened last time.
+SELECT kind, target, schedule, last_ok FROM snouttime.job_info
+WHERE target = 'i_metrics'::regclass ORDER BY kind;
+  kind   |  target   | schedule | last_ok 
+---------+-----------+----------+---------
+ migrate | i_metrics | @ 1 min  | 
+ premake | i_metrics | @ 1 hour | 
+(2 rows)
+
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE target = 'i_metrics'::regclass;
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind, target, last_ok, last_detail, last_took IS NOT NULL AS timed
+FROM snouttime.job_info WHERE target = 'i_metrics'::regclass AND last_ok IS NOT NULL;
+  kind   |  target   | last_ok |    last_detail    | timed 
+---------+-----------+---------+-------------------+-------
+ premake | i_metrics | t       | 0 partitions made | t
+(1 row)
+
+-- ---- the default partition can be dropped, once it is empty ----
+-- A row from outside every partition lands in the default one, and while it is there the
+-- default cannot be dropped.
+INSERT INTO i_metrics VALUES ('2018-07-04 00:00:00+00', 'h2', 7);
+SELECT snouttime.drop_default('i_metrics');
+ERROR:  public.i_metrics_default still holds 1 rows
+CALL snouttime.migrate('i_metrics');
+SELECT snouttime.drop_default('i_metrics');
+ drop_default 
+--------------
+ t
+(1 row)
+
+-- calling it again says there is nothing to drop rather than failing
+SELECT snouttime.drop_default('i_metrics');
+ drop_default 
+--------------
+ f
+(1 row)
+
+SELECT count(*) FILTER (WHERE state = 'default') AS defaults
+FROM snouttime.partition_info WHERE series = 'i_metrics'::regclass;
+ defaults 
+----------
+        0
+(1 row)
+
+SELECT count(*) AS rows_kept FROM i_metrics;
+ rows_kept 
+-----------
+        13
+(1 row)
+
+-- and from now on a row outside every partition has nowhere to go
+INSERT INTO i_metrics VALUES ('1999-01-01 00:00:00+00', 'h1', 1);
+ERROR:  no partition of relation "i_metrics" found for row
+-- ---- what a space key refuses ----
+CREATE TABLE i_bad (ts timestamptz NOT NULL, host text NOT NULL, id int UNIQUE);
+SELECT snouttime.create_series('i_bad', 'ts', partition_interval => '1 day', space_column => 'host');
+ERROR:  a space key needs both space_column and space_partitions
+SELECT snouttime.create_series('i_bad', 'ts', partition_interval => '1 day',
+	space_column => 'nope', space_partitions => 2);
+ERROR:  public.i_bad has no column named nope
+SELECT snouttime.create_series('i_bad', 'ts', partition_interval => '1 day',
+	space_column => 'ts', space_partitions => 2);
+ERROR:  the space key must be a different column from the time column
+SELECT snouttime.create_series('i_bad', 'ts', partition_interval => '1 day',
+	space_column => 'host', space_partitions => 1);
+ERROR:  space_partitions must be between 2 and 1024
+-- the unique index includes neither partition column
+SELECT snouttime.create_series('i_bad', 'ts', partition_interval => '1 day',
+	space_column => 'host', space_partitions => 2);
+ERROR:  unique index public.i_bad_id_key does not include ts
+-- ---- what a seal saved (Phase 8): the heap's size is kept when it is gone ----
+CREATE TABLE i_sz (ts timestamptz NOT NULL, host text NOT NULL, v int8);
+SELECT snouttime.create_series('i_sz', 'ts', partition_interval => '1 day', premake => 1);
+ create_series 
+---------------
+ i_sz
+(1 row)
+
+SELECT snouttime.make_partitions('i_sz', '2022-01-01', '2022-01-03');
+ make_partitions 
+-----------------
+               2
+(1 row)
+
+INSERT INTO i_sz SELECT timestamptz '2022-01-01+00' + g * interval '10 seconds', 'h' || (g % 5), g
+FROM generate_series(0, 2 * 8640 - 1) g;
+-- never sealed: nothing to report
+SELECT name, state, bytes_before FROM snouttime.partition_info
+WHERE series = 'i_sz'::regclass AND name = 'i_sz_p20220101';
+      name      | state | bytes_before 
+----------------+-------+--------------
+ i_sz_p20220101 | live  |             
+(1 row)
+
+SELECT pg_total_relation_size('i_sz_p20220101') AS heap_bytes \gset
+SELECT snouttime.seal('i_sz_p20220101');
+ seal 
+------
+    1
+(1 row)
+
+SELECT state, bytes_before = :heap_bytes AS is_the_heap, bytes < bytes_before AS smaller
+FROM snouttime.partition_info WHERE series = 'i_sz'::regclass AND name = 'i_sz_p20220101';
+ state  | is_the_heap | smaller 
+--------+-------------+---------
+ sealed | t           | t
+(1 row)
+
+SELECT sealed_bytes_before = :heap_bytes AS series_before, sealed_bytes > 0 AS series_after
+FROM snouttime.series_info WHERE series = 'i_sz'::regclass;
+ series_before | series_after 
+---------------+--------------
+ t             | t
+(1 row)
+
+-- a reseal keeps the size from the first seal
+SELECT snouttime.reseal('i_sz_p20220101');
+ reseal 
+--------
+      1
+(1 row)
+
+SELECT bytes_before = :heap_bytes AS still_the_first FROM snouttime.partition_info
+WHERE series = 'i_sz'::regclass AND name = 'i_sz_p20220101';
+ still_the_first 
+-----------------
+ t
+(1 row)
+
+-- an unseal forgets it, and so does a drop
+SELECT snouttime.unseal('i_sz_p20220101');
+ unseal 
+--------
+      1
+(1 row)
+
+SELECT bytes_before FROM snouttime.partition_info
+WHERE series = 'i_sz'::regclass AND name = 'i_sz_p20220101';
+ bytes_before 
+--------------
+             
+(1 row)
+
+SELECT snouttime.seal('i_sz_p20220102');
+ seal 
+------
+    1
+(1 row)
+
+SELECT 'i_sz_p20220101'::regclass::oid AS p1, 'i_sz_p20220102'::regclass::oid AS p2 \gset
+SELECT count(*) AS recorded FROM snouttime.seal_sizes WHERE relid::oid IN (:p1, :p2);
+ recorded 
+----------
+        1
+(1 row)
+
+DROP TABLE i_sz;
+SELECT count(*) AS recorded FROM snouttime.seal_sizes WHERE relid::oid IN (:p1, :p2);
+ recorded 
+----------
+        0
+(1 row)
+
+-- ---- the oldest and newest range are ordered as numbers on an integer series ----
+CREATE TABLE i_int (k int8 NOT NULL, v int);
+SELECT snouttime.create_series('i_int', 'k', partition_width => 5000, premake => 1);
+ create_series 
+---------------
+ i_int
+(1 row)
+
+SELECT snouttime.make_partitions('i_int', '5000', '15000');
+ make_partitions 
+-----------------
+               2
+(1 row)
+
+SELECT oldest_range, newest_range FROM snouttime.series_info WHERE series = 'i_int'::regclass;
+ oldest_range | newest_range 
+--------------+--------------
+ 5000         | 15000
+(1 row)
+

@@ -1,0 +1,164 @@
+-- Phase 2.4: snouttime.asof_join. Semantics in README.md ("As-of join").
+-- The property that matters is that it gives exactly what the LATERAL form gives; the right
+-- side is several cursor batches (10,000 rows each) long, so matches cross batch boundaries.
+SET client_min_messages = warning;
+-- right: 60,000 readings, unique time per host; left: 30,000 events at other times
+CREATE TABLE j_right AS
+SELECT 'h' || (g % 50) AS host, timestamptz '2026-01-01+00' + (g * 7) * interval '1 second' AS ts, g::float8 AS v
+FROM generate_series(1, 60000) AS g;
+INSERT INTO j_right VALUES (NULL, '2026-01-01 00:10+00', -1), ('h1', NULL, -2);
+CREATE TABLE j_left AS
+SELECT 'h' || (g % 53) AS host, timestamptz '2026-01-01+00' + (g * 13 + 3) * interval '1 second' AS ts, g AS kind
+FROM generate_series(1, 30000) AS g;
+INSERT INTO j_left VALUES (NULL, '2026-01-01 00:10+00', -1), ('h1', NULL, -2);
+-- the index the LATERAL reference needs (without it, it is 30,000 scans of the right side)
+CREATE INDEX ON j_right (host, ts);
+ANALYZE j_left, j_right;
+-- a tiny, readable one first
+SELECT * FROM snouttime.asof_join(
+	$$SELECT * FROM (VALUES ('a', 10, 'x'), ('a', 20, 'y'), ('b', 15, 'z'), ('a', 5, 'w')) AS l(k, t, what)$$,
+	$$SELECT * FROM (VALUES ('a', 10, 1.0), ('a', 12, 2.0), ('b', 16, 3.0), ('c', 1, 4.0)) AS r(k, t, v)$$,
+	keys => ARRAY['k'], left_time => 't')
+	AS (k text, t int, what text, rk text, rt int, v numeric);
+ k | t  | what | rk | rt |  v  
+---+----+------+----+----+-----
+ a |  5 | w    |    |    |    
+ a | 10 | x    | a  | 10 | 1.0
+ a | 20 | y    | a  | 12 | 2.0
+ b | 15 | z    |    |    |    
+(4 rows)
+
+-- forward: the earliest at or after
+SELECT * FROM snouttime.asof_join(
+	$$SELECT * FROM (VALUES ('a', 10, 'x'), ('a', 20, 'y'), ('b', 15, 'z'), ('a', 5, 'w')) AS l(k, t, what)$$,
+	$$SELECT * FROM (VALUES ('a', 10, 1.0), ('a', 12, 2.0), ('b', 16, 3.0), ('c', 1, 4.0)) AS r(k, t, v)$$,
+	keys => ARRAY['k'], left_time => 't', direction => 'forward')
+	AS (k text, t int, what text, rk text, rt int, v numeric);
+ k | t  | what | rk | rt |  v  
+---+----+------+----+----+-----
+ a |  5 | w    | a  | 10 | 1.0
+ a | 10 | x    | a  | 10 | 1.0
+ a | 20 | y    |    |    |    
+ b | 15 | z    | b  | 16 | 3.0
+(4 rows)
+
+-- ---- the property: equal to LATERAL, as multisets, both ways ----
+CREATE FUNCTION j_check(direction text, within interval) RETURNS TABLE (extra bigint, missing bigint, total bigint)
+LANGUAGE plpgsql AS $f$
+DECLARE
+	-- The reference, written the way a person would for each direction, so it uses the index.
+	reference text := format($q$
+		SELECT j.host, j.ts, j.kind, r.host, r.ts, r.v
+		FROM j_left j LEFT JOIN LATERAL (
+			SELECT * FROM j_right r WHERE r.host = j.host AND r.ts %s j.ts %s
+			ORDER BY r.ts %s LIMIT 1) r ON true$q$,
+		CASE direction WHEN 'forward' THEN '>=' ELSE '<=' END,
+		CASE WHEN within IS NULL THEN ''
+			WHEN direction = 'forward' THEN format('AND r.ts <= j.ts + %L::interval', within)
+			ELSE format('AND r.ts >= j.ts - %L::interval', within) END,
+		CASE direction WHEN 'forward' THEN 'ASC' ELSE 'DESC' END);
+	ours text := format($q$
+		SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right',
+			keys => ARRAY['host'], left_time => 'ts', within => %L, direction => %L)
+		AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8)$q$, within, direction);
+BEGIN
+	EXECUTE format('SELECT count(*) FROM (%s EXCEPT ALL %s) x', ours, reference) INTO extra;
+	EXECUTE format('SELECT count(*) FROM (%s EXCEPT ALL %s) x', reference, ours) INTO missing;
+	EXECUTE format('SELECT count(*) FROM (%s) x', ours) INTO total;
+	RETURN NEXT;
+END
+$f$;
+SELECT 'backward' AS direction, * FROM j_check('backward', NULL)
+UNION ALL SELECT 'forward', * FROM j_check('forward', NULL)
+UNION ALL SELECT 'backward within 30s', * FROM j_check('backward', interval '30 seconds')
+UNION ALL SELECT 'forward within 30s', * FROM j_check('forward', interval '30 seconds');
+      direction      | extra | missing | total 
+---------------------+-------+---------+-------
+ backward            |     0 |       0 | 30002
+ forward             |     0 |       0 | 30002
+ backward within 30s |     0 |       0 | 30002
+ forward within 30s  |     0 |       0 | 30002
+(4 rows)
+
+-- the rows with NULLs are returned, unmatched
+SELECT kind, r_host IS NULL AS unmatched FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right',
+	keys => ARRAY['host'], left_time => 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8)
+WHERE kind < 0 ORDER BY kind;
+ kind | unmatched 
+------+-----------
+   -2 | t
+   -1 | t
+(2 rows)
+
+-- two keys, and a date time
+SELECT * FROM snouttime.asof_join(
+	$$SELECT * FROM (VALUES (1, 'x', date '2026-01-10'), (1, 'y', date '2026-01-10'), (2, 'x', date '2026-01-03')) AS l(a, b, d)$$,
+	$$SELECT * FROM (VALUES (1, 'x', date '2026-01-01', 'p'), (1, 'x', date '2026-01-09', 'q'), (1, 'y', date '2026-01-11', 'r'),
+		(2, 'x', date '2025-12-01', 's')) AS r(a, b, d, tag)$$,
+	keys => ARRAY['a', 'b'], left_time => 'd', within => interval '7 days')
+	AS (a int, b text, d date, ra int, rb text, rd date, tag text);
+ a | b |     d      | ra | rb |     rd     | tag 
+---+---+------------+----+----+------------+-----
+ 1 | x | 01-10-2026 |  1 | x  | 01-09-2026 | q
+ 1 | y | 01-10-2026 |    |    |            | 
+ 2 | x | 01-03-2026 |    |    |            | 
+(3 rows)
+
+-- no keys: on time alone
+SELECT t, rt FROM snouttime.asof_join(
+	$$SELECT * FROM (VALUES (5), (10), (1)) AS l(t)$$, $$SELECT * FROM (VALUES (2), (9)) AS r(t)$$,
+	keys => ARRAY[]::text[], left_time => 't') AS (t int, rt int);
+ t  | rt 
+----+----
+  1 |   
+  5 |  2
+ 10 |  9
+(3 rows)
+
+-- either side empty
+SELECT count(*) AS left_rows_kept FROM snouttime.asof_join('SELECT * FROM j_left WHERE kind < 5',
+	'SELECT * FROM j_right WHERE false', keys => ARRAY['host'], left_time => 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ left_rows_kept 
+----------------
+              6
+(1 row)
+
+SELECT count(*) AS nothing FROM snouttime.asof_join('SELECT * FROM j_left WHERE false',
+	'SELECT * FROM j_right', keys => ARRAY['host'], left_time => 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ nothing 
+---------
+       0
+(1 row)
+
+-- ---- refusals, each with a sentence ----
+\set ON_ERROR_STOP 0
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right', ARRAY['host'], 'ts')
+	AS (host text, ts timestamptz, kind int);
+ERROR:  asof_join returns the left query's columns and then the right query's, so the column list must be (text, timestamp with time zone, integer, text, timestamp with time zone, double precision)
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right', ARRAY['nope'], 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ERROR:  the left query has no column "nope"
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT host, ts::date AS ts, v FROM j_right', ARRAY['host'], 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts date, v float8);
+ERROR:  the time columns must be the same type on both sides
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right', ARRAY['host'], 'ts', within => '1 month')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ERROR:  within cannot be in months: a month has no fixed length
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right', ARRAY['host'], 'ts', direction => 'sideways')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ERROR:  direction must be 'backward' or 'forward', not 'sideways'
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'DELETE FROM j_right RETURNING *', ARRAY['host'], 'ts')
+	AS (host text, ts timestamptz, kind int, r_host text, r_ts timestamptz, v float8);
+ERROR:  the right query must be a SELECT, since it is run as SELECT * FROM (<query>): syntax error at or near "FROM"
+SELECT * FROM snouttime.asof_join('SELECT * FROM j_left', 'SELECT * FROM j_right', ARRAY['host'], 'ts');
+ERROR:  a column definition list is required for functions returning "record" at character 15
+\set ON_ERROR_STOP 1
+SELECT count(*) AS right_rows_untouched FROM j_right;
+ right_rows_untouched 
+----------------------
+                60002
+(1 row)
+

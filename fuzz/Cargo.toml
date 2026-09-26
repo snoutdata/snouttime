@@ -1,0 +1,68 @@
+# Fuzz targets for every decoder of untrusted bytes (docs/snouttime/PLAN.md 3.2, R5).
+# Not part of the extension's build: `bash scripts/fuzz.sh` runs them with cargo-fuzz.
+# The pure modules are compiled in by path (src/lib.rs), so nothing here links Postgres.
+[package]
+name = "snouttime-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+zstd = { version = "=0.14.0", default-features = false }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "int"
+path = "fuzz_targets/int.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float"
+path = "fuzz_targets/float.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dict"
+path = "fuzz_targets/dict.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bitmap"
+path = "fuzz_targets/bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group"
+path = "fuzz_targets/group.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "meta"
+path = "fuzz_targets/meta.rs"
+test = false
+doc = false
+bench = false

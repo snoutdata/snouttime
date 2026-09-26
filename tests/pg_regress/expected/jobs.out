@@ -1,0 +1,375 @@
+-- Phase 1.2: the jobs, run by hand. The worker that calls them on a timer has its own
+-- test (src/worker.rs), because a regression test cannot wait for one.
+SET client_min_messages = notice;
+SET timezone = 'UTC';
+-- Every regression file shares one database, so another file's series tables have jobs of
+-- their own and run_due_job() would pick whichever is most overdue. Park them.
+UPDATE snouttime.jobs SET enabled = false WHERE target::text NOT LIKE 'j\_%';
+-- ---- what create_series schedules ----
+CREATE TABLE j_metrics (ts timestamptz NOT NULL, v float8);
+INSERT INTO j_metrics
+SELECT timestamptz '2020-03-01 00:00:00+00' + g * interval '6 hours', g
+FROM generate_series(0, 11) AS g;
+SELECT snouttime.create_series('j_metrics', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+NOTICE:  12 rows outside the premade partitions are in public.j_metrics_default; the worker moves them a partition at a time, or CALL snouttime.migrate('public.j_metrics') moves them now
+ create_series 
+---------------
+ j_metrics
+(1 row)
+
+-- premake every tenth of the interval (capped at an hour), and migrate while the default
+-- partition still holds rows
+SELECT kind, target, schedule, enabled FROM snouttime.jobs
+WHERE target::text LIKE 'j\_%' ORDER BY kind;
+  kind   |  target   | schedule | enabled 
+---------+-----------+----------+---------
+ migrate | j_metrics | @ 1 min  | t
+ premake | j_metrics | @ 1 hour | t
+(2 rows)
+
+-- ---- migrate: one partition per run, then the job removes itself ----
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind, target, ok, detail FROM snouttime.job_runs
+WHERE target::text LIKE 'j\_%' ORDER BY started_at;
+  kind   |  target   | ok |                                   detail                                    
+---------+-----------+----+-----------------------------------------------------------------------------
+ premake | j_metrics | t  | 0 partitions made; rows waiting in the default partition, migrate scheduled
+(1 row)
+
+SELECT count(*) AS still_in_default FROM j_metrics_default;
+ still_in_default 
+------------------
+               12
+(1 row)
+
+-- Each run is its own transaction on purpose: now() is frozen inside one, so a job that
+-- has just been rescheduled is not due again until the next statement. `-infinity` is how
+-- the test says "due now" without waiting a minute for the schedule.
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'migrate';
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'migrate';
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'migrate';
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+-- the default partition is empty now; the next run is the one that finds that and takes
+-- the job off the list
+SELECT count(*) AS still_in_default FROM j_metrics_default;
+ still_in_default 
+------------------
+                0
+(1 row)
+
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'migrate';
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind FROM snouttime.jobs WHERE target::text LIKE 'j\_%' ORDER BY kind;
+  kind   
+---------
+ premake
+(1 row)
+
+SELECT count(*) AS partitions FROM pg_inherits WHERE inhparent = 'j_metrics'::regclass;
+ partitions 
+------------
+          6
+(1 row)
+
+SELECT count(*) AS rows_kept FROM j_metrics;
+ rows_kept 
+-----------
+        12
+(1 row)
+
+-- ---- retention drops whole partitions, and only ones SnoutTime made ----
+SELECT snouttime.set_retention('j_metrics', interval '30 days');
+ set_retention 
+---------------
+ 
+(1 row)
+
+SELECT kind, schedule FROM snouttime.jobs WHERE target::text LIKE 'j\_%' ORDER BY kind;
+   kind    | schedule 
+-----------+----------
+ premake   | @ 1 hour
+ retention | @ 1 hour
+(2 rows)
+
+-- somebody else's partition, in range, must be left alone
+CREATE TABLE j_metrics_theirs PARTITION OF j_metrics
+	FOR VALUES FROM ('2019-01-01 00:00:00+00') TO ('2019-01-02 00:00:00+00');
+INSERT INTO j_metrics VALUES ('2019-01-01 12:00:00+00', 1);
+SELECT snouttime.apply_retention('j_metrics');
+ apply_retention 
+-----------------
+               3
+(1 row)
+
+-- The partitions around today are named by date, so they are shown as days from today.
+SELECT CASE WHEN c.relname ~ '_p[0-9]{8}$'
+	THEN 'j_metrics_p<today' || to_char(to_date(right(c.relname, 8), 'YYYYMMDD')
+		- (now() AT TIME ZONE 'UTC')::date, 'SG0') || '>'
+	ELSE c.relname END AS relname
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'j_metrics'::regclass ORDER BY 1;
+       relname        
+----------------------
+ j_metrics_default
+ j_metrics_p<today+0>
+ j_metrics_p<today+1>
+ j_metrics_theirs
+(4 rows)
+
+SELECT count(*) AS rows_kept FROM j_metrics;
+ rows_kept 
+-----------
+         1
+(1 row)
+
+-- a retention that keeps everything drops nothing
+SELECT snouttime.set_retention('j_metrics', NULL::interval);
+ set_retention 
+---------------
+ 
+(1 row)
+
+SELECT snouttime.apply_retention('j_metrics');
+ apply_retention 
+-----------------
+               0
+(1 row)
+
+SELECT kind FROM snouttime.jobs WHERE target::text LIKE 'j\_%' ORDER BY kind;
+  kind   
+---------
+ premake
+(1 row)
+
+-- ---- integer series: retention counts back from the largest value ----
+CREATE TABLE j_ticks (n bigint NOT NULL);
+INSERT INTO j_ticks SELECT g FROM generate_series(0, 4999) AS g;
+SELECT snouttime.create_series('j_ticks', 'n', partition_width => 1000, premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+NOTICE:  4000 rows outside the premade partitions are in public.j_ticks_default; the worker moves them a partition at a time, or CALL snouttime.migrate('public.j_ticks') moves them now
+ create_series 
+---------------
+ j_ticks
+(1 row)
+
+CALL snouttime.migrate('j_ticks');
+SELECT snouttime.set_retention('j_ticks', 2000::bigint);
+ set_retention 
+---------------
+ 
+(1 row)
+
+SELECT snouttime.apply_retention('j_ticks');
+ apply_retention 
+-----------------
+               2
+(1 row)
+
+SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'j_ticks'::regclass ORDER BY 1;
+     relname     
+-----------------
+ j_ticks_default
+ j_ticks_p2000
+ j_ticks_p3000
+ j_ticks_p4000
+ j_ticks_p5000
+(5 rows)
+
+SELECT min(n), max(n) FROM j_ticks;
+ min  | max  
+------+------
+ 2000 | 4999
+(1 row)
+
+-- ---- a failing job is recorded and rescheduled, and does not stop the others ----
+CREATE TABLE j_broken (ts timestamptz NOT NULL);
+SELECT snouttime.create_series('j_broken', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+ create_series 
+---------------
+ j_broken
+(1 row)
+
+-- An ordinary table squatting on the name tomorrow's partition wants: the premake job
+-- cannot create it and must say so rather than die.
+-- (A DO block rather than \gexec, which would echo today's date into the expected output.)
+DO $$ BEGIN
+	EXECUTE format('CREATE TABLE %I (x int)',
+		'j_broken_p' || to_char((now() AT TIME ZONE 'UTC') + interval '2 days', 'YYYYMMDD'));
+END $$;
+-- create_series already made today's and tomorrow's, so reach one day further
+UPDATE snouttime.series SET premake = 2 WHERE relid = 'j_broken'::regclass;
+DELETE FROM snouttime.job_runs;
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE target = 'j_broken'::regclass;
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind, target, ok, detail LIKE '%already exists%' AS says_why
+FROM snouttime.job_runs WHERE target::text LIKE 'j\_%' ORDER BY kind, started_at;
+  kind   |  target  | ok | says_why 
+---------+----------+----+----------
+ premake | j_broken | f  | t
+(1 row)
+
+SELECT kind, target, next_run > now() AS rescheduled FROM snouttime.jobs
+WHERE target = 'j_broken'::regclass ORDER BY kind;
+  kind   |  target  | rescheduled 
+---------+----------+-------------
+ premake | j_broken | t
+(1 row)
+
+-- and the next job still runs
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE target = 'j_metrics'::regclass;
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind, target, ok FROM snouttime.job_runs WHERE target::text LIKE 'j\_%'
+ORDER BY started_at DESC LIMIT 1;
+  kind   |  target   | ok 
+---------+-----------+----
+ premake | j_metrics | t
+(1 row)
+
+-- ---- only a superuser may start a worker ----
+CREATE ROLE snouttime_jobs_other;
+GRANT CREATE ON SCHEMA public TO snouttime_jobs_other;
+SET ROLE snouttime_jobs_other;
+SELECT snouttime.start_worker();
+ERROR:  only a superuser may start a SnoutTime worker
+RESET ROLE;
+REVOKE CREATE ON SCHEMA public FROM snouttime_jobs_other;
+DROP ROLE snouttime_jobs_other;
+-- ---- a row that arrives AFTER the conversion's sweep is swept too ----
+-- The migrate job removes itself once the default partition is empty, so the premake job,
+-- which runs on every series table, is what notices a late row and puts it back (found by
+-- tests/soak/soak.sh: before, a far-future or far-past insert stayed in the default
+-- partition for good).
+CREATE TABLE j_late (ts timestamptz NOT NULL, v int);
+SELECT snouttime.create_series('j_late', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+ create_series 
+---------------
+ j_late
+(1 row)
+
+SELECT kind FROM snouttime.jobs WHERE target = 'j_late'::regclass ORDER BY kind;
+  kind   
+---------
+ premake
+(1 row)
+
+INSERT INTO j_late VALUES ('2020-06-15 12:00:00+00', 1);
+UPDATE snouttime.jobs SET next_run = 'infinity' WHERE target <> 'j_late'::regclass;
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'premake' AND target = 'j_late'::regclass;
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT detail FROM snouttime.job_runs WHERE target = 'j_late'::regclass AND kind = 'premake';
+                                   detail                                    
+-----------------------------------------------------------------------------
+ 0 partitions made; rows waiting in the default partition, migrate scheduled
+(1 row)
+
+SELECT kind FROM snouttime.jobs WHERE target = 'j_late'::regclass ORDER BY kind;
+  kind   
+---------
+ migrate
+ premake
+(2 rows)
+
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'migrate' AND target = 'j_late'::regclass;
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT count(*) AS late_rows_still_in_default FROM j_late_default;
+ late_rows_still_in_default 
+----------------------------
+                          0
+(1 row)
+
+SELECT tableoid::regclass AS now_in FROM j_late;
+      now_in      
+------------------
+ j_late_p20200615
+(1 row)
+
+-- ---- drop_before: a one-off retention, same rules ----
+CREATE TABLE j_once (ts timestamptz NOT NULL, v int);
+SELECT snouttime.create_series('j_once', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+ create_series 
+---------------
+ j_once
+(1 row)
+
+SELECT snouttime.make_partitions('j_once', '2020-01-01', '2020-01-05');
+ make_partitions 
+-----------------
+               4
+(1 row)
+
+INSERT INTO j_once SELECT timestamptz '2020-01-01+00' + g * interval '1 hour', g FROM generate_series(0, 95) g;
+-- 01-01 and 01-02 end at or before 01-03 00:00; 01-03 does not, although it starts there
+SELECT snouttime.drop_before('j_once', timestamptz '2020-01-03 00:00+00') AS dropped;
+ dropped 
+---------
+       2
+(1 row)
+
+SELECT min(ts), count(*) FROM j_once;
+             min              | count 
+------------------------------+-------
+ Fri Jan 03 00:00:00 2020 UTC |    48
+(1 row)
+
+SELECT snouttime.drop_before('j_once', timestamptz '2020-01-03 12:00+00') AS dropped_nothing_partial;
+ dropped_nothing_partial 
+-------------------------
+                       0
+(1 row)
+
+\set ON_ERROR_STOP 0
+SELECT snouttime.drop_before('j_once', 100::bigint);
+ERROR:  public.j_once has a timestamp with time zone time column: give drop_before a time
+\set ON_ERROR_STOP 1

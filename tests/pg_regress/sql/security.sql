@@ -1,0 +1,54 @@
+-- Phase 6: what a role that is not a superuser can and cannot do (PLAN.md Phase 6's security
+-- review). S3 credentials are unreadable and unsettable, the object collector is not
+-- callable, and the extension's SECURITY DEFINER helpers act only for a table's owner.
+SET client_min_messages = warning;
+SET snouttime.s3_secret_access_key = 'a secret';
+CREATE ROLE st_plain LOGIN;
+CREATE SCHEMA sec AUTHORIZATION st_plain;
+CREATE TABLE sec_other (a int);
+-- load the library, as a real session would have by now
+SELECT snouttime.version() IS NOT NULL AS loaded;
+SET ROLE st_plain;
+SET search_path = sec, public;
+\set ON_ERROR_STOP 0
+SHOW snouttime.s3_secret_access_key;
+SHOW snouttime.s3_access_key_id;
+SELECT count(*) AS visible FROM pg_settings WHERE name = 'snouttime.s3_secret_access_key' AND setting = 'a secret';
+SET snouttime.s3_secret_access_key = 'mine';
+SET snouttime.tier_to = 's3://elsewhere/x';
+SELECT snouttime.tier_gc();
+-- the helpers behind the event triggers, called directly on somebody else's table
+SELECT snouttime._columnar_sync('sec_other');
+SELECT snouttime._columnar_drop_side('sec_other'::regclass::oid);
+SELECT snouttime._columnar_forget('delta_1', 'deletes_1');
+-- what a column store holds is read only by a role that may read the table
+SELECT * FROM snouttime.column_sizes('sec_other');
+\set ON_ERROR_STOP 1
+-- tiering with credentials in settings, not preloaded: refused, since they would be readable
+RESET ROLE;
+SET snouttime.tier_to = 's3://b/p';
+SET snouttime.s3_access_key_id = 'k';
+CREATE TABLE sec_tier (a int);
+INSERT INTO sec_tier VALUES (1);
+\set ON_ERROR_STOP 0
+SELECT snouttime.tier('sec_tier');
+\set ON_ERROR_STOP 1
+SET ROLE st_plain;
+SET search_path = sec, public;
+-- what the role CAN do: seal a table of its own
+CREATE TABLE sec_mine (a int);
+INSERT INTO sec_mine SELECT generate_series(1, 10);
+SELECT snouttime.seal('sec_mine');
+SELECT sum(a) FROM sec_mine;
+INSERT INTO sec_mine VALUES (11);
+SELECT sum(a) FROM sec_mine;
+SELECT attname, encoding, rows FROM snouttime.column_sizes('sec_mine');
+RESET ROLE;
+-- every SECURITY DEFINER function the extension defines pins its search_path
+SELECT p.proname FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'snouttime'
+WHERE p.prolang <> (SELECT oid FROM pg_language WHERE lanname = 'c')
+	AND p.prosecdef AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%')
+ORDER BY 1;
+SELECT p.proname AS definer FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'snouttime' WHERE p.prosecdef ORDER BY 1;

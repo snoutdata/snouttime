@@ -1,0 +1,3 @@
+[toolchain]
+# Must match the rust image tag in container/Containerfile (PLAN.md D1).
+channel = "1.98.1"

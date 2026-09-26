@@ -1,0 +1,7 @@
+/target/
+tests/pg_regress/results/
+tests/pg_regress/regression.diffs
+tests/pg_regress/regression.out
+# A tiny run is a smoke test of the harness, never a result.
+bench/results/*-tiny.md
+bench/results/*-tiny-*.md

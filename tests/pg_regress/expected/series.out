@@ -1,0 +1,327 @@
+-- Phase 1.1: create_series, migrate, drop_series, and the refusals.
+SET client_min_messages = notice;
+SET timezone = 'America/New_York';   -- partitions must still be aligned in UTC
+-- ---- an empty table ----
+CREATE TABLE empty_metrics (ts timestamptz NOT NULL, host text, v float8);
+SELECT snouttime.create_series('empty_metrics', 'ts', partition_interval => '1 day', premake => 3);
+NOTICE:  snouttime is not in shared_preload_libraries
+ create_series 
+---------------
+ empty_metrics
+(1 row)
+
+-- now()'s partition plus three ahead, plus the default
+SELECT count(*) FROM pg_inherits WHERE inhparent = 'empty_metrics'::regclass;
+ count 
+-------
+     5
+(1 row)
+
+INSERT INTO empty_metrics VALUES (now(), 'a', 1);
+SELECT tableoid::regclass::text LIKE 'empty_metrics_p%' AS routed_to_a_partition FROM empty_metrics;
+ routed_to_a_partition 
+-----------------------
+ t
+(1 row)
+
+-- Only this file's tables: pg_regress runs every file in the same database.
+SELECT relid, time_column, time_type, partition_interval, premake FROM snouttime.series
+WHERE relid IN ('empty_metrics'::regclass);
+     relid     | time_column |        time_type         | partition_interval | premake 
+---------------+-------------+--------------------------+--------------------+---------
+ empty_metrics | ts          | timestamp with time zone | @ 1 day            |       3
+(1 row)
+
+-- ---- a table with data, indexes, a trigger, a foreign key, grants and a comment ----
+CREATE TABLE hosts (name text PRIMARY KEY);
+INSERT INTO hosts VALUES ('a'), ('b');
+CREATE TABLE metrics (
+	ts timestamptz NOT NULL,
+	host text NOT NULL REFERENCES hosts (name),
+	v float8 CHECK (v >= 0),
+	PRIMARY KEY (host, ts)
+);
+CREATE INDEX metrics_by_time ON metrics (ts DESC);
+COMMENT ON TABLE metrics IS 'readings';
+CREATE ROLE snouttime_regress_reader;
+GRANT SELECT ON metrics TO snouttime_regress_reader;
+CREATE FUNCTION announce() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF TG_OP = 'DELETE' THEN RAISE NOTICE 'deleted %', OLD.ts; RETURN OLD; END IF;
+	RAISE NOTICE 'inserted %', NEW.ts; RETURN NEW;
+END $$;
+CREATE TRIGGER announce BEFORE INSERT OR DELETE ON metrics FOR EACH ROW EXECUTE FUNCTION announce();
+SET client_min_messages = warning;
+INSERT INTO metrics
+SELECT timestamptz '2020-03-01 00:00:00+00' + g * interval '6 hours', CASE WHEN g % 2 = 0 THEN 'a' ELSE 'b' END, g
+FROM generate_series(0, 11) AS g;
+SET client_min_messages = notice;
+SELECT snouttime.create_series('metrics', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+NOTICE:  12 rows outside the premade partitions are in public.metrics_default; the worker moves them a partition at a time, or CALL snouttime.migrate('public.metrics') moves them now
+ create_series 
+---------------
+ metrics
+(1 row)
+
+-- the old table is now the default partition and still holds the 2020 rows
+SELECT count(*) FROM metrics_default;
+ count 
+-------
+    12
+(1 row)
+
+-- moving rows fires no user trigger: no 'deleted' or 'inserted' notices here
+CALL snouttime.migrate('metrics');
+SELECT count(*) FROM metrics_default;
+ count 
+-------
+     0
+(1 row)
+
+-- three days of 2020 data, three partitions named and bounded in UTC
+SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'metrics'::regclass AND c.relname LIKE 'metrics_p2020%'
+ORDER BY 1;
+      relname      |                                     pg_get_expr                                      
+-------------------+--------------------------------------------------------------------------------------
+ metrics_p20200301 | FOR VALUES FROM ('Sat Feb 29 19:00:00 2020 EST') TO ('Sun Mar 01 19:00:00 2020 EST')
+ metrics_p20200302 | FOR VALUES FROM ('Sun Mar 01 19:00:00 2020 EST') TO ('Mon Mar 02 19:00:00 2020 EST')
+ metrics_p20200303 | FOR VALUES FROM ('Mon Mar 02 19:00:00 2020 EST') TO ('Tue Mar 03 19:00:00 2020 EST')
+(3 rows)
+
+SELECT count(*), min(ts), max(ts) FROM metrics;
+ count |             min              |             max              
+-------+------------------------------+------------------------------
+    12 | Sat Feb 29 19:00:00 2020 EST | Tue Mar 03 13:00:00 2020 EST
+(1 row)
+
+-- what carried over
+SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'metrics'::regclass ORDER BY 1;
+   indexrelid    
+-----------------
+ metrics_pkey
+ metrics_by_time
+(2 rows)
+
+-- (NOT NULL is left out: Postgres 18 lists it in pg_constraint and 17 does not)
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'metrics'::regclass AND contype <> 'n' ORDER BY 1;
+      conname      |           pg_get_constraintdef            
+-------------------+-------------------------------------------
+ metrics_host_fkey | FOREIGN KEY (host) REFERENCES hosts(name)
+ metrics_pkey      | PRIMARY KEY (host, ts)
+ metrics_v_check   | CHECK ((v >= (0)::double precision))
+(3 rows)
+
+SELECT tgname FROM pg_trigger WHERE tgrelid = 'metrics'::regclass AND NOT tgisinternal;
+  tgname  
+----------
+ announce
+(1 row)
+
+SELECT obj_description('metrics'::regclass, 'pg_class');
+ obj_description 
+-----------------
+ readings
+(1 row)
+
+SELECT has_table_privilege('snouttime_regress_reader', 'metrics', 'SELECT');
+ has_table_privilege 
+---------------------
+ t
+(1 row)
+
+-- the trigger fires for a row in a new partition, and the foreign key is enforced
+INSERT INTO metrics VALUES ('2020-03-02 12:00:00+00', 'a', 1) ON CONFLICT DO NOTHING;
+NOTICE:  inserted Mon Mar 02 07:00:00 2020 EST
+INSERT INTO metrics VALUES ('2020-03-02 13:00:00+00', 'nobody', 1);
+NOTICE:  inserted Mon Mar 02 08:00:00 2020 EST
+ERROR:  insert or update on table "metrics_p20200302" violates foreign key constraint "metrics_host_fkey"
+-- ---- partitions for data that is not from today ----
+CREATE TABLE backfill (ts timestamptz NOT NULL);
+SELECT snouttime.create_series('backfill', 'ts', partition_interval => '1 day', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+ create_series 
+---------------
+ backfill
+(1 row)
+
+-- [lo, hi): the range holding hi is not made
+SELECT snouttime.make_partitions('backfill', '2022-02-01T00:00:00+00', '2022-02-04T00:00:00+00');
+ make_partitions 
+-----------------
+               3
+(1 row)
+
+SELECT name FROM snouttime.partition_info
+WHERE series = 'backfill'::regclass AND name LIKE '%2022%' ORDER BY name;
+        name        
+--------------------
+ backfill_p20220201
+ backfill_p20220202
+ backfill_p20220203
+(3 rows)
+
+-- a bulk load then lands in partitions instead of the default one
+INSERT INTO backfill SELECT timestamptz '2022-02-01 00:00:00+00' + g * interval '8 hours'
+FROM generate_series(0, 8) AS g;
+SELECT count(*) AS in_default FROM backfill_default;
+ in_default 
+------------
+          0
+(1 row)
+
+-- and it is idempotent
+SELECT snouttime.make_partitions('backfill', '2022-02-01T00:00:00+00', '2022-02-04T00:00:00+00');
+ make_partitions 
+-----------------
+               0
+(1 row)
+
+-- ---- integer time ----
+CREATE TABLE ticks (n bigint NOT NULL, v float8);
+INSERT INTO ticks SELECT g, g FROM generate_series(1, 2500) AS g;
+SELECT snouttime.create_series('ticks', 'n', partition_width => 1000, premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+NOTICE:  1999 rows outside the premade partitions are in public.ticks_default; the worker moves them a partition at a time, or CALL snouttime.migrate('public.ticks') moves them now
+ create_series 
+---------------
+ ticks
+(1 row)
+
+CALL snouttime.migrate('ticks');
+SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'ticks'::regclass ORDER BY 1;
+    relname    |             pg_get_expr              
+---------------+--------------------------------------
+ ticks_default | DEFAULT
+ ticks_p0      | FOR VALUES FROM ('0') TO ('1000')
+ ticks_p1000   | FOR VALUES FROM ('1000') TO ('2000')
+ ticks_p2000   | FOR VALUES FROM ('2000') TO ('3000')
+ ticks_p3000   | FOR VALUES FROM ('3000') TO ('4000')
+(5 rows)
+
+-- ---- a month interval ----
+CREATE TABLE monthly (d date NOT NULL);
+INSERT INTO monthly VALUES ('2021-01-31'), ('2021-02-01'), ('2021-03-15');
+SELECT snouttime.create_series('monthly', 'd', partition_interval => '1 month', premake => 1);
+NOTICE:  snouttime is not in shared_preload_libraries
+NOTICE:  3 rows outside the premade partitions are in public.monthly_default; the worker moves them a partition at a time, or CALL snouttime.migrate('public.monthly') moves them now
+ create_series 
+---------------
+ monthly
+(1 row)
+
+CALL snouttime.migrate('monthly');
+SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'monthly'::regclass AND c.relname LIKE 'monthly_p2021%' ORDER BY 1;
+      relname      |                   pg_get_expr                    
+-------------------+--------------------------------------------------
+ monthly_p20210101 | FOR VALUES FROM ('01-01-2021') TO ('02-01-2021')
+ monthly_p20210201 | FOR VALUES FROM ('02-01-2021') TO ('03-01-2021')
+ monthly_p20210301 | FOR VALUES FROM ('03-01-2021') TO ('04-01-2021')
+(3 rows)
+
+-- ---- refusals, each a sentence, each leaving the table untouched ----
+CREATE TABLE r1 (ts timestamptz);
+SELECT snouttime.create_series('r1', 'nope', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  public.r1 has no column named nope
+SELECT snouttime.create_series('r1', 'ts');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  a timestamp with time zone time column is partitioned by partition_interval, an interval such as '1 day'
+SELECT snouttime.create_series('r1', 'ts', partition_interval => '1 month 2 days');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  partition_interval @ 1 mon 2 days mixes months with days or hours; use one or the other
+SELECT snouttime.create_series('r1', 'ts', partition_width => 10);
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  a timestamp with time zone time column is partitioned by partition_interval, an interval such as '1 day'
+CREATE TABLE r2 (label text);
+SELECT snouttime.create_series('r2', 'label', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  column label of public.r2 is text, and a series table needs a timestamptz, timestamp, date or integer time column
+CREATE TABLE r3 (id int UNIQUE, ts timestamptz);
+SELECT snouttime.create_series('r3', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  unique index public.r3_id_key does not include ts
+CREATE TABLE r4 (ts timestamptz);
+INSERT INTO r4 VALUES (NULL);
+SELECT snouttime.create_series('r4', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  public.r4 has rows where ts is NULL, and a series table needs a time on every row
+CREATE TABLE r5 (ts timestamptz);
+CREATE VIEW r5_view AS SELECT * FROM r5;
+SELECT snouttime.create_series('r5', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  public.r5 is used by public.r5_view and they would go on reading the old table
+CREATE TABLE r6 (id bigint GENERATED ALWAYS AS IDENTITY, ts timestamptz);
+SELECT snouttime.create_series('r6', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  identity column id cannot move into a partitioned table yet
+CREATE UNLOGGED TABLE r7 (ts timestamptz);
+SELECT snouttime.create_series('r7', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  public.r7 is unlogged, and Postgres does not allow an unlogged partitioned table
+SELECT snouttime.create_series('metrics', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  public.metrics is already a series table
+-- nothing was registered or renamed by any of them
+SELECT relid FROM snouttime.series
+WHERE relid::text ~ '^(empty_metrics|metrics|ticks|monthly|theirs|r[0-9])$' ORDER BY relid::text;
+     relid     
+---------------
+ empty_metrics
+ metrics
+ monthly
+ ticks
+(4 rows)
+
+SELECT count(*) FROM pg_class WHERE relname LIKE 'r__default';
+ count 
+-------
+     0
+(1 row)
+
+-- ---- only the owner ----
+CREATE ROLE snouttime_regress_other;
+CREATE TABLE theirs (ts timestamptz NOT NULL);
+SET ROLE snouttime_regress_other;
+SELECT snouttime.create_series('theirs', 'ts', partition_interval => '1 day');
+NOTICE:  snouttime is not in shared_preload_libraries
+ERROR:  permission denied: only the owner of public.theirs may make it a series table
+INSERT INTO snouttime.series (relid, time_column, time_type, partition_interval)
+	VALUES ('theirs', 'ts', 'timestamptz', '1 day');
+ERROR:  permission denied: only the owner of public.theirs may change its SnoutTime settings
+DELETE FROM snouttime.series WHERE relid = 'metrics'::regclass;
+ERROR:  permission denied: only the owner of public.metrics may change its SnoutTime settings
+RESET ROLE;
+-- ---- drop_series and DROP TABLE ----
+SELECT snouttime.drop_series('ticks');
+ drop_series 
+-------------
+ 
+(1 row)
+
+SELECT relkind FROM pg_class WHERE oid = 'ticks'::regclass;
+ relkind 
+---------
+ p
+(1 row)
+
+DROP TABLE monthly;
+SELECT relid FROM snouttime.series
+WHERE relid::text ~ '^(empty_metrics|metrics|ticks|monthly|theirs)$' ORDER BY relid::text;
+     relid     
+---------------
+ empty_metrics
+ metrics
+(2 rows)
+
+DROP OWNED BY snouttime_regress_reader;
+DROP ROLE snouttime_regress_reader;
+DROP OWNED BY snouttime_regress_other;
+DROP ROLE snouttime_regress_other;

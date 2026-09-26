@@ -1,0 +1,119 @@
+-- Phase 2.1: snouttime.bucket. Semantics in README.md ("Time buckets").
+-- Most checks are properties over many times, printed as a count of violations (0), so a
+-- failure says which rule broke rather than which of a thousand values changed.
+SET client_min_messages = warning;
+-- A session zone that is neither UTC nor a whole hour, to prove the zone-free forms ignore it.
+SET timezone = 'Asia/Kolkata';
+
+-- ---- the basics ----
+SELECT snouttime.bucket('15 minutes', timestamptz '2026-09-22 10:52:31+00') AT TIME ZONE 'UTC' AS quarter_hour;
+SELECT snouttime.bucket('1 day', timestamptz '2026-09-22 23:30:00+00') AT TIME ZONE 'UTC' AS utc_day;
+-- weeks start on Monday by default (2026-09-22 is a Tuesday)
+SELECT snouttime.bucket('1 week', timestamptz '2026-09-22 10:00:00+00') AT TIME ZONE 'UTC' AS monday;
+SELECT snouttime.bucket('1 month', timestamptz '2026-09-22 10:00:00+00') AT TIME ZONE 'UTC' AS month;
+SELECT snouttime.bucket('3 months', timestamptz '2026-09-22 10:00:00+00') AT TIME ZONE 'UTC' AS quarter;
+SELECT snouttime.bucket('1 year', timestamptz '2026-09-22 10:00:00+00') AT TIME ZONE 'UTC' AS year;
+SELECT snouttime.bucket('1 hour', timestamp '2026-09-22 10:52:31') AS plain_timestamp;
+SELECT snouttime.bucket('1 month', date '2026-09-22') AS date_month;
+SELECT snouttime.bucket('7 days', date '2026-09-22') AS date_week;
+SELECT snouttime.bucket(10, 1234) AS int4, snouttime.bucket(10::bigint, -1::bigint) AS int8_negative,
+	snouttime.bucket(10, 1234, 5) AS with_offset;
+-- an origin moves the grid
+SELECT snouttime.bucket('1 hour', timestamptz '2026-09-22 10:52:31+00',
+	origin => timestamptz '2000-01-01 00:30:00+00') AT TIME ZONE 'UTC' AS half_past;
+-- before the origin rounds DOWN, not towards the origin
+SELECT snouttime.bucket('1 day', timestamptz '1999-12-31 23:59:59+00') AT TIME ZONE 'UTC' AS before_origin;
+-- NULL in, NULL out; infinity stays infinity
+SELECT snouttime.bucket('1 day', NULL::timestamptz) IS NULL AS null_in;
+SELECT snouttime.bucket('1 day', timestamptz 'infinity') AS infinite;
+
+-- ---- zone-free buckets are UTC, and agree with Postgres's own date_bin ----
+SELECT count(*) AS differs_from_date_bin
+FROM generate_series(timestamptz '2023-01-01 00:00:00+00', timestamptz '2026-12-31 00:00:00+00',
+	interval '7 hours 13 minutes 17 seconds') AS t,
+	(VALUES (interval '1 second'), ('90 seconds'), ('15 minutes'), ('1 hour'), ('6 hours'),
+		('1 day'), ('7 days'), ('10 days')) AS w(width)
+WHERE snouttime.bucket(w.width, t) <> date_bin(w.width, t, timestamptz '2000-01-03 00:00:00+00');
+-- the session zone changes nothing
+SET timezone = 'America/Los_Angeles';
+SELECT snouttime.bucket('1 day', timestamptz '2026-09-22 03:00:00+00') AT TIME ZONE 'UTC' AS still_utc;
+SET timezone = 'Asia/Kolkata';
+
+-- ---- months: calendar arithmetic, leap years, month-end origins ----
+-- every month bucket in UTC equals date_trunc('month') in UTC
+SELECT count(*) AS month_differs
+FROM generate_series(timestamptz '1999-01-01 00:00:00+00', timestamptz '2030-12-31 00:00:00+00',
+	interval '1 day 1 hour 1 minute') AS t
+WHERE snouttime.bucket('1 month', t) <> date_trunc('month', t, 'UTC');
+SELECT count(*) AS year_differs
+FROM generate_series(timestamptz '1590-01-01 00:00:00+00', timestamptz '2410-12-31 00:00:00+00',
+	interval '97 days 5 hours') AS t
+WHERE snouttime.bucket('1 year', t) <> date_trunc('year', t, 'UTC');
+-- leap days: Feb 29 in a leap year, and 1900 (not one) and 2000 (one)
+SELECT d, snouttime.bucket('1 month', d) AS month, snouttime.bucket('1 year', d) AS year
+FROM (VALUES (date '2024-02-29'), (date '2000-02-29'), (date '1900-02-28'), (date '1900-03-01')) AS v(d);
+-- an origin on the 31st: buckets start Jan 31, Feb 29 (clamped), Mar 31, never drifting to the 29th
+SELECT t::date, snouttime.bucket('1 month', t, origin => timestamp '2000-01-31 00:00:00')::date AS bucket
+FROM (VALUES (timestamp '2024-02-28 12:00'), (timestamp '2024-02-29 00:00'), (timestamp '2024-03-30 23:59'),
+	(timestamp '2024-03-31 00:00'), (timestamp '2025-02-28 00:00'), (timestamp '2025-03-01 00:00')) AS v(t);
+-- quarters from a mid-quarter origin
+SELECT snouttime.bucket('3 months', date '2026-09-22', origin => date '2000-02-15') AS fiscal_quarter;
+
+-- ---- time zones: DST-correct in three zones with different rules ----
+-- New York (2 am changes), Berlin (changes at 1 am UTC), Lord Howe (a HALF-hour DST shift).
+-- Day and month buckets start at LOCAL midnight: they equal Postgres's own date_trunc in the zone.
+SELECT z.zone, count(*) FILTER (WHERE snouttime.bucket('1 day', t, z.zone) <> date_trunc('day', t, z.zone)) AS day_differs,
+	count(*) FILTER (WHERE snouttime.bucket('1 month', t, z.zone) <> date_trunc('month', t, z.zone)) AS month_differs
+FROM (VALUES ('America/New_York'), ('Europe/Berlin'), ('Australia/Lord_Howe')) AS z(zone),
+	generate_series(timestamptz '2025-01-01 00:00:00+00', timestamptz '2026-12-31 00:00:00+00',
+		interval '17 minutes') AS t
+GROUP BY z.zone ORDER BY z.zone;
+-- Every width, every zone: a bucket is never after its time, is monotone, starts on the
+-- LOCAL grid, and is at most one width plus the DST shift (an hour here) before its time.
+SELECT z.zone, w.width,
+	count(*) FILTER (WHERE b > t) AS starts_after_its_time,
+	count(*) FILTER (WHERE b < lag_b) AS not_monotone,
+	count(*) FILTER (WHERE w.width < '1 day' AND t - b >= w.width + interval '1 hour') AS too_far_back,
+	count(*) FILTER (WHERE w.width < '1 day' AND extract(epoch FROM (b AT TIME ZONE z.zone)
+		- timestamp '2000-01-03 00:00:00')::bigint % extract(epoch FROM w.width)::bigint <> 0) AS off_the_local_grid
+FROM (VALUES ('America/New_York'), ('Europe/Berlin'), ('Australia/Lord_Howe')) AS z(zone),
+	(VALUES (interval '15 minutes'), ('1 hour'), ('90 minutes'), ('1 day'), ('1 week'), ('1 month')) AS w(width),
+	LATERAL (SELECT t, b, lag(b) OVER (ORDER BY t) AS lag_b
+		FROM generate_series(timestamptz '2026-03-01 00:00:00+00', timestamptz '2026-11-30 00:00:00+00',
+			interval '7 minutes') AS t,
+		LATERAL (SELECT snouttime.bucket(w.width, t, z.zone) AS b) AS bb) AS s
+GROUP BY z.zone, w.width ORDER BY z.zone, w.width;
+-- The day New York falls back (2026-11-01) is 25 hours long, and the day it springs forward
+-- (2026-03-08) is 23: one bucket each, starting at local midnight.
+SELECT snouttime.bucket('1 day', t, 'America/New_York') AT TIME ZONE 'UTC' AS bucket_utc,
+	count(*) AS hours_in_it
+FROM generate_series(timestamptz '2026-03-07 05:00:00+00', timestamptz '2026-03-09 03:00:00+00', interval '1 hour') AS t
+GROUP BY 1 ORDER BY 1;
+SELECT snouttime.bucket('1 day', t, 'America/New_York') AT TIME ZONE 'UTC' AS bucket_utc,
+	count(*) AS hours_in_it
+FROM generate_series(timestamptz '2026-10-31 04:00:00+00', timestamptz '2026-11-02 04:00:00+00', interval '1 hour') AS t
+GROUP BY 1 ORDER BY 1;
+-- The hour that happens twice in New York is two hourly buckets, both 01:00 locally.
+SELECT t AT TIME ZONE 'UTC' AS t_utc,
+	snouttime.bucket('1 hour', t, 'America/New_York') AT TIME ZONE 'UTC' AS bucket_utc,
+	snouttime.bucket('1 hour', t, 'America/New_York') AT TIME ZONE 'America/New_York' AS bucket_local
+FROM generate_series(timestamptz '2026-11-01 05:30:00+00', timestamptz '2026-11-01 07:30:00+00', interval '30 minutes') AS t;
+-- Lord Howe moves by 30 minutes: its hourly buckets still start on the local hour.
+SELECT count(*) AS lord_howe_not_on_the_local_hour
+FROM generate_series(timestamptz '2026-01-01 00:00:00+00', timestamptz '2026-12-31 00:00:00+00', interval '13 minutes') AS t
+WHERE extract(minute FROM snouttime.bucket('1 hour', t, 'Australia/Lord_Howe') AT TIME ZONE 'Australia/Lord_Howe') <> 0;
+-- a local origin in the zone
+SELECT snouttime.bucket('1 day', timestamptz '2026-09-22 03:00:00+00', 'Europe/Berlin',
+	origin => timestamp '2000-01-01 06:00:00') AT TIME ZONE 'Europe/Berlin' AS six_am_day;
+
+-- ---- refusals, each with a sentence ----
+\set ON_ERROR_STOP 0
+SELECT snouttime.bucket('1 month 1 day', timestamptz '2026-09-22 00:00:00+00');
+SELECT snouttime.bucket('0 seconds', timestamptz '2026-09-22 00:00:00+00');
+SELECT snouttime.bucket('-1 hour', timestamptz '2026-09-22 00:00:00+00');
+SELECT snouttime.bucket('-1 month', timestamptz '2026-09-22 00:00:00+00');
+SELECT snouttime.bucket('1 hour', date '2026-09-22');
+SELECT snouttime.bucket(0, 5);
+SELECT snouttime.bucket('1 day', timestamptz '2026-09-22 00:00:00+00', 'Not/AZone');
+SELECT snouttime.bucket('1 day', timestamptz '2026-09-22 00:00:00+00', origin => timestamptz '-infinity');
+\set ON_ERROR_STOP 1

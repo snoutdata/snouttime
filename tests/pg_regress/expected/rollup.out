@@ -1,0 +1,377 @@
+-- Phase 4: rollups. The property checked everywhere: the rollup's view returns exactly what the
+-- same aggregate computed from the raw rows returns, before a refresh, after one, and after
+-- late, updated, deleted and truncated rows, and through a rollup of a rollup.
+SET client_min_messages = warning;
+SET timezone = 'UTC';
+UPDATE snouttime.jobs SET enabled = false WHERE target::text NOT LIKE 'r\_%';
+CREATE TABLE r_src (ts timestamptz NOT NULL, host text NOT NULL, v float8);
+SELECT snouttime.create_series('r_src', 'ts', partition_interval => '1 day', premake => 1);
+ create_series 
+---------------
+ r_src
+(1 row)
+
+SELECT snouttime.make_partitions('r_src', '2026-01-01', '2026-01-04');
+ make_partitions 
+-----------------
+               3
+(1 row)
+
+INSERT INTO r_src SELECT timestamptz '2026-01-01+00' + g * interval '1 minute', 'h' || (g % 2), g % 97
+FROM generate_series(0, 2 * 1440 - 1) AS g;
+SELECT snouttime.create_rollup('r_hourly', 'r_src', interval '1 hour',
+	select_list => 'host, max(v) AS max_v, count(*) AS n, sum(v) AS total', group_by => 'host');
+ create_rollup 
+---------------
+ r_hourly
+(1 row)
+
+CREATE FUNCTION r_same() RETURNS TABLE (extra bigint, missing bigint, total bigint)
+LANGUAGE sql AS $$
+	WITH truth AS (SELECT snouttime.bucket('1 hour', ts) AS bucket, host, max(v) AS max_v, count(*) AS n, sum(v) AS total
+		FROM r_src GROUP BY 1, 2)
+	SELECT (SELECT count(*) FROM (SELECT * FROM r_hourly EXCEPT ALL SELECT * FROM truth) x),
+		(SELECT count(*) FROM (SELECT * FROM truth EXCEPT ALL SELECT * FROM r_hourly) x),
+		(SELECT count(*) FROM r_hourly)
+$$;
+-- before any refresh the view is all live
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+SELECT count(*) AS materialized FROM r_hourly_materialized;
+ materialized 
+--------------
+            0
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') AS ranges;
+ ranges 
+--------
+      1
+(1 row)
+
+SELECT count(*) AS materialized FROM r_hourly_materialized;
+ materialized 
+--------------
+           96
+(1 row)
+
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') AS nothing_to_do;
+ nothing_to_do 
+---------------
+             0
+(1 row)
+
+-- a late row into a materialized bucket: logged, and visible at once through the view
+INSERT INTO r_src VALUES ('2026-01-01 05:30:00.5+00', 'h0', 1000);
+SELECT rollup::text, snouttime._key_text(lo, 'timestamptz') AS lo FROM snouttime.invalidations;
+  rollup  |               lo               
+----------+--------------------------------
+ r_hourly | Thu Jan 01 05:30:00.5 2026 UTC
+(1 row)
+
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+SELECT max_v FROM r_hourly WHERE bucket = '2026-01-01 05:00+00' AND host = 'h0';
+ max_v 
+-------
+  1000
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') AS ranges;
+ ranges 
+--------
+      1
+(1 row)
+
+SELECT count(*) AS pending FROM snouttime.invalidations;
+ pending 
+---------
+       0
+(1 row)
+
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+-- updates (both the old and the new time) and deletes
+UPDATE r_src SET ts = ts + interval '20 hours' WHERE ts BETWEEN '2026-01-01 01:00' AND '2026-01-01 01:05';
+DELETE FROM r_src WHERE ts >= '2026-01-01 10:00' AND ts < '2026-01-01 10:30' AND host = 'h1';
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') AS ranges;
+ ranges 
+--------
+      1
+(1 row)
+
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+-- a rollup of a rollup: daily from hourly, merging the hourly aggregates
+SELECT snouttime.create_rollup('r_daily', 'r_hourly', interval '1 day',
+	select_list => 'host, max(max_v) AS max_v, sum(n) AS n', group_by => 'host');
+ create_rollup 
+---------------
+ r_daily
+(1 row)
+
+CREATE FUNCTION r_daily_same() RETURNS TABLE (extra bigint, missing bigint, total bigint)
+LANGUAGE sql AS $$
+	WITH truth AS (SELECT snouttime.bucket('1 day', ts) AS bucket, host, max(v) AS max_v, count(*)::numeric AS n
+		FROM r_src GROUP BY 1, 2)
+	SELECT (SELECT count(*) FROM (SELECT * FROM r_daily EXCEPT ALL SELECT * FROM truth) x),
+		(SELECT count(*) FROM (SELECT * FROM truth EXCEPT ALL SELECT * FROM r_daily) x),
+		(SELECT count(*) FROM r_daily)
+$$;
+SELECT * FROM r_daily_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |     4
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_daily') AS ranges;
+ ranges 
+--------
+      1
+(1 row)
+
+SELECT * FROM r_daily_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |     4
+(1 row)
+
+-- a late raw row reaches the daily rollup at once, through the chain
+INSERT INTO r_src VALUES ('2026-01-02 12:00+00', 'h1', 5000);
+SELECT count(*) AS pending_for_daily FROM snouttime.invalidations WHERE rollup = 'r_daily'::regclass;
+ pending_for_daily 
+-------------------
+                 1
+(1 row)
+
+SELECT * FROM r_daily_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |     4
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly'), snouttime.refresh_rollup('r_daily');
+ refresh_rollup | refresh_rollup 
+----------------+----------------
+              1 |              1
+(1 row)
+
+SELECT * FROM r_daily_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |     4
+(1 row)
+
+SELECT * FROM r_same();
+ extra | missing | total 
+-------+---------+-------
+     0 |       0 |    96
+(1 row)
+
+-- the refresh job
+UPDATE snouttime.jobs SET next_run = '-infinity' WHERE kind = 'refresh';
+INSERT INTO r_src VALUES ('2026-01-01 23:59+00', 'h0', 7);
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT snouttime.run_due_job();
+ run_due_job 
+-------------
+ t
+(1 row)
+
+SELECT kind, target::text, ok, detail FROM snouttime.job_runs WHERE kind = 'refresh' ORDER BY started_at;
+  kind   |  target  | ok |            detail             
+---------+----------+----+-------------------------------
+ refresh | r_hourly | t  | 1 range of buckets recomputed
+ refresh | r_daily  | t  | 1 range of buckets recomputed
+(2 rows)
+
+-- retention on the source drops a partition; the rollup keeps its buckets, and a late row for
+-- that day (landing in the default partition) does not overwrite them with a fragment
+SELECT count(*) AS hourly_buckets_of_jan_1 FROM r_hourly_materialized WHERE bucket < '2026-01-02';
+ hourly_buckets_of_jan_1 
+-------------------------
+                      48
+(1 row)
+
+UPDATE snouttime.series SET retention = now() - timestamptz '2026-01-02 00:00+00' WHERE relid = 'r_src'::regclass;
+SELECT snouttime.apply_retention('r_src');
+ apply_retention 
+-----------------
+               1
+(1 row)
+
+SELECT count(*) AS hourly_buckets_of_jan_1 FROM r_hourly_materialized WHERE bucket < '2026-01-02';
+ hourly_buckets_of_jan_1 
+-------------------------
+                      48
+(1 row)
+
+INSERT INTO r_src VALUES ('2026-01-01 03:00+00', 'h0', 1);
+SELECT n FROM r_hourly WHERE bucket = '2026-01-01 03:00+00' AND host = 'h0';
+ n  
+----
+ 30
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') >= 0 AS refreshed;
+ refreshed 
+-----------
+ t
+(1 row)
+
+SELECT n FROM r_hourly WHERE bucket = '2026-01-01 03:00+00' AND host = 'h0';
+ n  
+----
+ 30
+(1 row)
+
+-- a rollup's own retention
+SELECT snouttime.set_rollup_retention('r_hourly', now() - timestamptz '2026-01-01 12:00+00');
+ set_rollup_retention 
+----------------------
+ 
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_hourly') >= 0 AS refreshed;
+ refreshed 
+-----------
+ t
+(1 row)
+
+SELECT min(bucket) FROM r_hourly_materialized;
+             min              
+------------------------------
+ Thu Jan 01 13:00:00 2026 UTC
+(1 row)
+
+-- mergeable or refused
+\set ON_ERROR_STOP 0
+SELECT snouttime.create_rollup('r_bad', 'r_hourly', interval '1 day', select_list => 'avg(max_v)');
+ERROR:  a rollup of a rollup merges its source's aggregates, and avg of them is not avg of the rows
+SELECT snouttime.create_rollup('r_bad', 'r_hourly', interval '1 day', select_list => 'count(DISTINCT host)');
+ERROR:  a rollup of a rollup merges its source's aggregates, and count(DISTINCT) of them is not count(DISTINCT) of the rows
+SELECT snouttime.create_rollup('r_bad', 'r_src', select_list => 'max(v)');
+ERROR:  a rollup over a timestamp with time zone column needs a bucket interval
+SELECT snouttime.create_rollup('r_bad', 'r_src', interval '1 hour');
+ERROR:  a rollup needs a select list: the aggregates to keep per bucket
+-- a group_by the select list does not return (0.1.1): its rows could not be told apart
+SELECT snouttime.create_rollup('r_bad', 'r_src', interval '1 hour', select_list => 'max(v) AS max_v', group_by => 'host');
+ERROR:  group_by names host, but the select list does not return it, so the rollup's rows could not be told apart
+SELECT snouttime.create_rollup('r_bad', 'r_src', interval '1 hour', select_list => 'max(v) AS max_v', group_by => '"host"');
+ERROR:  group_by names "host", but the select list does not return it, so the rollup's rows could not be told apart
+SELECT snouttime.drop_rollup('r_hourly');
+ERROR:  rollups are built on public.r_hourly; drop them first
+\set ON_ERROR_STOP 1
+-- an integer time column
+CREATE TABLE r_ticks (n int8 NOT NULL, v int);
+SELECT snouttime.create_series('r_ticks', 'n', partition_width => 1000, premake => 1);
+ create_series 
+---------------
+ r_ticks
+(1 row)
+
+INSERT INTO r_ticks SELECT g, g % 10 FROM generate_series(0, 4999) g;
+CALL snouttime.migrate('r_ticks');
+SELECT snouttime.create_rollup('r_tick_sums', 'r_ticks', bucket_width => 100, select_list => 'sum(v) AS s');
+ create_rollup 
+---------------
+ r_tick_sums
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_tick_sums') AS ranges;
+ ranges 
+--------
+      1
+(1 row)
+
+INSERT INTO r_ticks VALUES (150, 1000);
+SELECT count(*) AS buckets, sum(s) FROM r_tick_sums;
+ buckets |  sum  
+---------+-------
+      50 | 23500
+(1 row)
+
+SELECT count(*), sum(v) FROM r_ticks;
+ count |  sum  
+-------+-------
+  5001 | 23500
+(1 row)
+
+-- TRUNCATE empties a rollup too
+TRUNCATE r_ticks;
+SELECT count(*) AS buckets_after_truncate FROM r_tick_sums;
+ buckets_after_truncate 
+------------------------
+                      0
+(1 row)
+
+SELECT snouttime.refresh_rollup('r_tick_sums') >= 0 AS refreshed;
+ refreshed 
+-----------
+ t
+(1 row)
+
+SELECT count(*) AS materialized_after_truncate FROM r_tick_sums_materialized;
+ materialized_after_truncate 
+-----------------------------
+                           0
+(1 row)
+
+-- dropping: the chain from the top, and the triggers go with the last rollup
+SELECT snouttime.drop_rollup('r_daily');
+ drop_rollup 
+-------------
+ 
+(1 row)
+
+SELECT snouttime.drop_rollup('r_hourly');
+ drop_rollup 
+-------------
+ 
+(1 row)
+
+SELECT count(*) AS triggers_left FROM pg_trigger WHERE tgrelid = 'r_src'::regclass AND tgname LIKE 'snouttime_invalidate%';
+ triggers_left 
+---------------
+             0
+(1 row)
+
+SELECT count(*) AS rollups_left FROM snouttime.rollups WHERE source = 'r_src'::regclass;
+ rollups_left 
+--------------
+            0
+(1 row)
+

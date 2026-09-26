@@ -1,0 +1,25 @@
+# PLAN.md R4: every dependency must be compatible with MIT, whatever this project's own
+# licence ends up being. `cargo deny check licenses` runs first in scripts/test.sh.
+[graph]
+all-features = false
+
+[licenses]
+allow = [
+	"MIT",
+	"MIT-0",
+	"Apache-2.0",
+	"Apache-2.0 WITH LLVM-exception",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"ISC",
+	"Zlib",
+	"Unicode-3.0",
+	"PostgreSQL",
+]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+
+# SnoutTime itself is Apache-2.0 (LICENSE); it is publish = false because it is built into a
+# Postgres extension and never published to crates.io, so it is skipped here as private.
+[licenses.private]
+ignore = true

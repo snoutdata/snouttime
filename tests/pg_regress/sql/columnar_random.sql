@@ -1,0 +1,163 @@
+-- A sealed table and its heap twin, put through the same random sequence of operations (a fixed
+-- seed, so the sequence is the same every run), and compared after every one through three
+-- ways of reading: the plain scan, SnoutTime's custom scan, and an index scan. Written after a
+-- crash that only one combination of operations reached (a btree's cleanup of entries of
+-- delete-then-reinserted rows, 2026-09-23): the point is combinations no targeted test tried.
+SET client_min_messages = warning;
+SET snouttime.columnar_group_rows = 200;
+
+CREATE TABLE rh (id int8, k int, s text, f float8);
+INSERT INTO rh SELECT g, g % 37, md5(g::text), g / 7.0 FROM generate_series(1, 3000) g;
+CREATE TABLE rc (LIKE rh);
+INSERT INTO rc SELECT * FROM rh;
+CREATE INDEX ON rh (k, id);
+CREATE INDEX ON rc (k, id);
+SELECT snouttime.seal('rc');
+
+CREATE FUNCTION r_diff() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+	how text;
+	n bigint;
+BEGIN
+	FOREACH how IN ARRAY ARRAY['custom', 'plain', 'index'] LOOP
+		PERFORM set_config('snouttime.columnar_custom_scan', CASE how WHEN 'plain' THEN 'off' ELSE 'on' END, true);
+		PERFORM set_config('enable_seqscan', CASE how WHEN 'index' THEN 'off' ELSE 'on' END, true);
+		PERFORM set_config('enable_bitmapscan', 'off', true);
+		IF how = 'index' THEN
+			EXECUTE 'SELECT count(*) FROM ((SELECT * FROM rc WHERE k BETWEEN 3 AND 9 EXCEPT ALL SELECT * FROM rh WHERE k BETWEEN 3 AND 9)
+				UNION ALL (SELECT * FROM rh WHERE k BETWEEN 3 AND 9 EXCEPT ALL SELECT * FROM rc WHERE k BETWEEN 3 AND 9)) x' INTO n;
+		ELSE
+			EXECUTE 'SELECT count(*) FROM ((SELECT * FROM rc EXCEPT ALL SELECT * FROM rh)
+				UNION ALL (SELECT * FROM rh EXCEPT ALL SELECT * FROM rc)) x' INTO n;
+		END IF;
+		IF n <> 0 THEN
+			RETURN how || ' differs by ' || n;
+		END IF;
+	END LOOP;
+	PERFORM set_config('snouttime.columnar_custom_scan', 'on', true);
+	PERFORM set_config('enable_seqscan', 'on', true);
+	PERFORM set_config('enable_bitmapscan', 'on', true);
+	RETURN NULL;
+END $$;
+
+CREATE FUNCTION r_both(sql text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+	EXECUTE replace(sql, '$t', 'rh');
+	EXECUTE replace(sql, '$t', 'rc');
+END $$;
+
+-- The sequence: each step picks an operation and its arguments from the same random stream.
+CREATE TABLE r_log (step int, op text, result text);
+DO $$
+DECLARE
+	i int;
+	r float8;
+	a int;
+	b int;
+	op text;
+	d text;
+	next_id int8 := 100000;
+BEGIN
+	PERFORM setseed(0.4242);
+	FOR i IN 1 .. 300 LOOP
+		r := random();
+		a := (random() * 3000)::int;
+		b := a + (random() * 60)::int;
+		IF r < 0.30 THEN
+			op := 'insert';
+			PERFORM r_both(format('INSERT INTO $t SELECT %s + g, (%s + g) %% 37, md5(g::text), g FROM generate_series(1, %s) g',
+				next_id, next_id, 1 + (random() * 50)::int));
+			next_id := next_id + 100;
+		ELSIF r < 0.50 THEN
+			op := 'delete';
+			PERFORM r_both(format('DELETE FROM $t WHERE id BETWEEN %s AND %s', a, b));
+		ELSIF r < 0.70 THEN
+			op := 'update';
+			PERFORM r_both(format('UPDATE $t SET f = f + 1, s = left(s, 5) WHERE id BETWEEN %s AND %s', a, b));
+		ELSIF r < 0.75 THEN
+			op := 'update key';
+			PERFORM r_both(format('UPDATE $t SET k = k + 1 WHERE k = %s', a % 37));
+		ELSIF r < 0.80 THEN
+			op := 'delete key';
+			PERFORM r_both(format('DELETE FROM $t WHERE k = %s AND id %% 3 = 0', a % 37));
+		ELSIF r < 0.85 THEN
+			op := 'reseal';
+			PERFORM snouttime.reseal('rc');
+		ELSIF r < 0.90 THEN
+			op := 'vacuum';
+			-- VACUUM cannot run in a DO block; ANALYZE can, and exercises the sampler
+			ANALYZE rc;
+			ANALYZE rh;
+		ELSIF r < 0.93 THEN
+			op := 'rewrite';
+			PERFORM r_both('ALTER TABLE $t ALTER COLUMN f TYPE float8 USING f + 0');
+		ELSIF r < 0.95 THEN
+			op := 'add column';
+			IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'rc'::regclass AND attname = 'extra') THEN
+				PERFORM r_both('ALTER TABLE $t ADD COLUMN extra int DEFAULT 7');
+			ELSE
+				PERFORM r_both('ALTER TABLE $t DROP COLUMN extra');
+			END IF;
+		ELSIF r < 0.96 THEN
+			op := 'truncate';
+			PERFORM r_both('TRUNCATE $t');
+			PERFORM r_both('INSERT INTO $t (id, k, s, f) SELECT g, g % 37, md5(g::text), g / 7.0 FROM generate_series(1, 500) g');
+		ELSE
+			op := 'unseal and seal';
+			PERFORM snouttime.unseal('rc');
+			PERFORM snouttime.seal('rc');
+		END IF;
+		d := r_diff();
+		INSERT INTO r_log VALUES (i, op, d);
+		IF d IS NOT NULL THEN
+			RAISE EXCEPTION 'step % (%) left the tables different: %', i, op, d;
+		END IF;
+	END LOOP;
+END $$;
+
+SELECT op, count(*) AS steps FROM r_log GROUP BY op ORDER BY op;
+SELECT count(*) AS steps_with_a_difference FROM r_log WHERE result IS NOT NULL;
+-- and VACUUM, which cannot run inside the loop
+VACUUM rc;
+VACUUM FULL rc;
+VACUUM FULL rh;
+SELECT r_diff() AS after_vacuum;
+SELECT count(*) > 0 AS still_rows FROM rc;
+
+-- Rows that keep only some columns decoded until asked (the lazy slot, 2026-09-23), through the
+-- executor nodes that hold on to a row or copy it: a merge over sealed partitions with DISTINCT
+-- ON (which compares two columns and keeps whole rows), an index fetch per outer row, and a
+-- scrollable cursor read backwards (which stores rows). Each against a heap twin.
+CREATE TABLE lz (ts timestamptz NOT NULL, host text NOT NULL, a float8, b float8, c text) PARTITION BY RANGE (ts);
+CREATE TABLE lz1 PARTITION OF lz FOR VALUES FROM ('2026-01-01+00') TO ('2026-01-02+00');
+CREATE TABLE lz2 PARTITION OF lz FOR VALUES FROM ('2026-01-02+00') TO ('2026-01-03+00');
+INSERT INTO lz SELECT timestamptz '2026-01-01+00' + g * interval '15 seconds', 'h' || (g % 11), g / 3.0, g % 7, md5(g::text)
+FROM generate_series(0, 10000) g;
+CREATE INDEX ON lz (host, ts DESC);
+CREATE TABLE lzh AS SELECT * FROM lz;
+CREATE INDEX ON lzh (host, ts DESC);
+SELECT snouttime.seal('lz1'), snouttime.seal('lz2');
+ANALYZE lz;
+ANALYZE lzh;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT (SELECT md5(string_agg(x::text, ';')) FROM (SELECT DISTINCT ON (host) * FROM lz ORDER BY host, ts DESC) x)
+	= (SELECT md5(string_agg(x::text, ';')) FROM (SELECT DISTINCT ON (host) * FROM lzh ORDER BY host, ts DESC) x) AS last_point_same;
+SELECT (SELECT sum(c.a) FROM generate_series(1, 500) e
+	CROSS JOIN LATERAL (SELECT a FROM lz WHERE host = 'h' || (e % 11) AND ts <= timestamptz '2026-01-01+00' + e * interval '5 minutes'
+		ORDER BY ts DESC LIMIT 1) c)
+	= (SELECT sum(c.a) FROM generate_series(1, 500) e
+	CROSS JOIN LATERAL (SELECT a FROM lzh WHERE host = 'h' || (e % 11) AND ts <= timestamptz '2026-01-01+00' + e * interval '5 minutes'
+		ORDER BY ts DESC LIMIT 1) c) AS asof_same;
+BEGIN;
+DECLARE cur SCROLL CURSOR FOR SELECT * FROM lz WHERE host = 'h3' ORDER BY host, ts DESC;
+FETCH 3 FROM cur;
+FETCH BACKWARD 2 FROM cur;
+FETCH ABSOLUTE 100 FROM cur;
+COMMIT;
+BEGIN;
+DECLARE curh SCROLL CURSOR FOR SELECT * FROM lzh WHERE host = 'h3' ORDER BY host, ts DESC;
+FETCH ABSOLUTE 100 FROM curh;
+COMMIT;
+RESET enable_seqscan;
+RESET enable_bitmapscan;

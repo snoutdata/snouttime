@@ -1,0 +1,7 @@
+comment = 'SnoutTime: time-series storage for Postgres'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'snouttime'
+schema = snouttime
+relocatable = false
+superuser = true
+trusted = false
