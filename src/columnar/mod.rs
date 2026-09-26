@@ -479,10 +479,15 @@ AS $$
 DECLARE
 	r record;
 BEGIN
-	FOR r IN SELECT objid FROM pg_event_trigger_dropped_objects()
-		WHERE object_type = 'table' AND schema_name <> 'snouttime_internal'
-			AND (to_regclass('snouttime_internal.delta_' || objid) IS NOT NULL
-				OR to_regclass('snouttime_internal.deletes_' || objid) IS NOT NULL)
+	-- The catalog, not to_regclass: to_regclass needs USAGE on snouttime_internal, which a
+	-- database's owner does not have on SnoutData Cloud, so every DROP TABLE in a database with
+	-- SnoutTime failed with "permission denied for schema snouttime_internal" (0.1.5, found
+	-- 2026-09-26; the suite ran as a superuser and never saw it).
+	FOR r IN SELECT d.objid FROM pg_event_trigger_dropped_objects() d
+		WHERE d.object_type = 'table' AND d.schema_name <> 'snouttime_internal'
+			AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'snouttime_internal'
+					AND c.relname IN ('delta_' || d.objid, 'deletes_' || d.objid))
 	LOOP
 		PERFORM snouttime._columnar_drop_side(r.objid);
 	END LOOP;

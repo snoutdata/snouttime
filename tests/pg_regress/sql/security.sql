@@ -43,6 +43,24 @@ SELECT sum(a) FROM sec_mine;
 INSERT INTO sec_mine VALUES (11);
 SELECT sum(a) FROM sec_mine;
 SELECT attname, encoding, rows FROM snouttime.column_sizes('sec_mine');
+-- ...and DROP tables, which it could not until 0.1.5: the sql_drop event trigger read
+-- snouttime_internal through to_regclass, which needs USAGE this role does not have, so every
+-- DROP TABLE in the database failed (found on SnoutData Cloud, whose owner is such a role).
+CREATE TABLE sec_plain (a int);
+DROP TABLE sec_plain;
+SELECT 'sec_mine'::regclass::oid AS mine_oid \gset
+DROP TABLE sec_mine;
+SELECT count(*) AS side_tables_left FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'snouttime_internal' AND c.relname IN ('delta_' || :mine_oid, 'deletes_' || :mine_oid);
+-- and a series of its own, down to dropping its default partition and the whole table
+CREATE TABLE sec_series (ts timestamptz NOT NULL, v int);
+SELECT snouttime.create_series('sec_series', 'ts', partition_interval => '1 day', premake => 1);
+SELECT snouttime.make_partitions('sec_series', '2026-01-01', '2026-01-03');
+INSERT INTO sec_series SELECT timestamptz '2026-01-01+00' + g * interval '1 minute', g FROM generate_series(0, 2879) g;
+SELECT snouttime.drop_default('sec_series');
+SELECT snouttime.seal('sec_series_p20260101');
+DROP TABLE sec_series;
+SELECT count(*) AS left_behind FROM pg_class WHERE relname LIKE 'sec\_series%';
 RESET ROLE;
 -- every SECURITY DEFINER function the extension defines pins its search_path
 SELECT p.proname FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'

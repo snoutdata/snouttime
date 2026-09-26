@@ -1614,7 +1614,7 @@ checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
 name = "snouttime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hmac",
  "lz4_flex",
