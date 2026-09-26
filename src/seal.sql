@@ -307,27 +307,8 @@ BEGIN
 END
 $$;
 
--- How much of a sealed table has changed since its seal: rows in its delta store plus rows
--- in its delete log, counted up to `upto` (so asking costs at most `upto` rows of reading).
-CREATE FUNCTION snouttime._changed_since_seal(leaf regclass, upto int8) RETURNS int8
-LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	n int8 := 0;
-	m int8;
-	side regclass;
-BEGIN
-	FOREACH side IN ARRAY ARRAY[to_regclass('snouttime_internal.delta_' || leaf::oid),
-		to_regclass('snouttime_internal.deletes_' || leaf::oid)]
-	LOOP
-		CONTINUE WHEN side IS NULL;
-		EXECUTE format('SELECT count(*) FROM (SELECT 1 FROM %s LIMIT %s) x', side, upto) INTO m;
-		n := n + m;
-	END LOOP;
-	RETURN n;
-END
-$$;
+-- snouttime._changed_since_seal(leaf, upto), which the reseal check below asks, is in
+-- src/columnar/read.rs: it reads the side tables, which SQL run as a table's owner cannot.
 
 
 CREATE FUNCTION snouttime.set_sealing(relation regclass, after interval,

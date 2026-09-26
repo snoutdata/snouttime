@@ -59,6 +59,15 @@ SELECT snouttime.make_partitions('sec_series', '2026-01-01', '2026-01-03');
 INSERT INTO sec_series SELECT timestamptz '2026-01-01+00' + g * interval '1 minute', g FROM generate_series(0, 2879) g;
 SELECT snouttime.drop_default('sec_series');
 SELECT snouttime.seal('sec_series_p20260101');
+-- ...and its seal job, which the worker runs as the table's owner: once nothing is left to
+-- seal it asks how much each sealed partition has changed, and until 0.1.6 that read the side
+-- tables in SQL and failed on every run for a role like this one
+INSERT INTO sec_series VALUES ('2026-01-01 12:00:30+00', -1);
+SELECT snouttime._changed_since_seal('sec_series_p20260101', 100) AS changed;
+SELECT snouttime.set_sealing('sec_series', interval '1 day');
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
 DROP TABLE sec_series;
 SELECT count(*) AS left_behind FROM pg_class WHERE relname LIKE 'sec\_series%';
 RESET ROLE;

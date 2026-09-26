@@ -128,6 +128,40 @@ SELECT snouttime.seal('sec_series_p20260101');
     1
 (1 row)
 
+-- ...and its seal job, which the worker runs as the table's owner: once nothing is left to
+-- seal it asks how much each sealed partition has changed, and until 0.1.6 that read the side
+-- tables in SQL and failed on every run for a role like this one
+INSERT INTO sec_series VALUES ('2026-01-01 12:00:30+00', -1);
+SELECT snouttime._changed_since_seal('sec_series_p20260101', 100) AS changed;
+ changed 
+---------
+       1
+(1 row)
+
+SELECT snouttime.set_sealing('sec_series', interval '1 day');
+ set_sealing 
+-------------
+ 
+(1 row)
+
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
+             detail              
+---------------------------------
+ sealed sec.sec_series_p20260102
+(1 row)
+
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
+             detail              
+---------------------------------
+ sealed sec.sec_series_p20260103
+(1 row)
+
+SELECT detail FROM snouttime._do_job('seal', 'sec_series');
+     detail      
+-----------------
+ nothing to seal
+(1 row)
+
 DROP TABLE sec_series;
 SELECT count(*) AS left_behind FROM pg_class WHERE relname LIKE 'sec\_series%';
  left_behind 

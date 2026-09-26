@@ -829,6 +829,46 @@ pub fn side_tables(relid: pg_sys::Oid) -> (pg_sys::Oid, pg_sys::Oid) {
 	}
 }
 
+/// How much of a sealed table has changed since its seal: rows in its delta store plus entries
+/// in its delete log, counted up to `upto` each (so asking costs at most that much reading).
+/// The seal job asks it of every sealed partition to decide what to reseal, running as the
+/// table's owner, so it reads the side tables here rather than in SQL: SQL needs USAGE on
+/// snouttime_internal, which an owner who is not a superuser does not have, and in 0.1.0-0.1.5
+/// the job failed on every run for such an owner (found on SnoutData Cloud). Needs SELECT on
+/// the table, as reading its rows would.
+#[pg_extern(stable)]
+fn _changed_since_seal(leaf: pgrx::PgRelation, upto: i64) -> i64 {
+	unsafe {
+		if pg_sys::pg_class_aclcheck(leaf.oid(), pg_sys::GetUserId(), pg_sys::ACL_SELECT as pg_sys::AclMode) != pg_sys::AclResult::ACLCHECK_OK {
+			ereport!(
+				PgLogLevel::ERROR,
+				PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+				format!("permission denied for table {}", leaf.name())
+			);
+		}
+		let (delta, deletes) = side_tables(leaf.oid());
+		let snapshot = pg_sys::GetActiveSnapshot();
+		let mut n = 0i64;
+		for side in [delta, deletes] {
+			if side == pg_sys::InvalidOid {
+				continue;
+			}
+			let rel = pg_sys::table_open(side, pg_sys::AccessShareLock as i32);
+			let scan = pg_sys::table_beginscan(rel, snapshot, 0, std::ptr::null_mut());
+			let slot = pg_sys::table_slot_create(rel, std::ptr::null_mut());
+			let mut m = 0i64;
+			while m < upto && pg_sys::table_scan_getnextslot(scan, pg_sys::ScanDirection::ForwardScanDirection, slot) {
+				m += 1;
+			}
+			pg_sys::ExecDropSingleTupleTableSlot(slot);
+			pg_sys::table_endscan(scan);
+			pg_sys::table_close(rel, pg_sys::NoLock as i32);
+			n += m;
+		}
+		n
+	}
+}
+
 /// The column-store rows deleted as far as `snapshot` can see, sorted. Lock-only entries are
 /// not deletes.
 ///
