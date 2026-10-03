@@ -9,7 +9,7 @@ SnoutTime runs in every [SnoutData Cloud](https://snoutdata.com/cloud) project
 (`CREATE EXTENSION snouttime`), and its source is here under the Apache License 2.0. Series
 tables, the time functions, sketches, as-of and window joins, sealed (columnar) partitions,
 rollups and tiering work and are tested on Postgres 17 and 18. Documentation for using it is at
-[docs.snoutdata.com/cloud/timeseries](https://docs.snoutdata.com/cloud/timeseries/overview); the
+[docs.snoutdata.com/stack/snouttime](https://docs.snoutdata.com/stack/snouttime/overview); the
 rules every change follows are in `CONTRIBUTING.md`.
 
 Issues and pull requests are welcome.
