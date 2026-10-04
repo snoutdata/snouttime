@@ -333,6 +333,15 @@ COMMENT ON ACCESS METHOD snouttime_tiered IS
 -- tell who called it (inside a definer, current_user is the definer), and it need not: all it
 -- does is make a table's side tables match its access method and columns, which is the same
 -- whoever asks. The side tables hold no data a caller could not read through the table.
+--
+-- And because it runs as the extension's owner, it never evaluates anything the table's owner
+-- wrote (2026-10-04). It used to give an added column the table's DEFAULT expression, which an
+-- ALTER TABLE then evaluated here, so a default calling a function of the owner's ran it as the
+-- superuser. The rows already in the delta store now get the column's missing value copied from
+-- the table, where Postgres stored it when the owner's own ALTER TABLE evaluated the default as
+-- the owner; and a type change that would have to cast rows in the delta store with a cast of
+-- someone else's is refused rather than run (it cannot arise: a change that casts rows rewrites
+-- the table, and a rewrite empties its side tables first).
 -- Takes side tables out of the extension and drops them. A member of an extension cannot be
 -- dropped on its own. Only called by the two SECURITY DEFINER functions here.
 CREATE FUNCTION snouttime._columnar_forget(delta text, deletes text) RETURNS void
@@ -355,6 +364,19 @@ END
 $$;
 REVOKE EXECUTE ON FUNCTION snouttime._columnar_forget(text, text) FROM PUBLIC;
 
+-- The type a domain is ultimately over (a type that is not a domain is its own).
+CREATE FUNCTION snouttime._base_type(typ oid) RETURNS oid
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+	WITH RECURSIVE b(t, d) AS (
+		SELECT typ, 0
+		UNION ALL
+		SELECT y.typbasetype, b.d + 1 FROM b JOIN pg_type y ON y.oid = b.t WHERE y.typtype = 'd'
+	)
+	SELECT t FROM b ORDER BY d DESC LIMIT 1
+$$;
+
 CREATE FUNCTION snouttime._columnar_sync(rel regclass) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -369,6 +391,7 @@ DECLARE
 	cols text := '';
 	dropped text[] := '{}';
 	dropped_col text;
+	busy boolean;
 BEGIN
 	SELECT am.amname IN ('snouttime_columnar', 'snouttime_tiered') INTO columnar
 	FROM pg_class c LEFT JOIN pg_am am ON am.oid = c.relam WHERE c.oid = rel;
@@ -412,10 +435,9 @@ BEGIN
 	-- In step: every attribute number of the table has one in the delta store.
 	FOR a IN SELECT t.attnum, t.attname, t.attisdropped, format_type(t.atttypid, t.atttypmod) AS typ,
 			dd.attname AS dname, dd.attisdropped AS ddropped, format_type(dd.atttypid, dd.atttypmod) AS dtyp,
-			pg_get_expr(ad.adbin, ad.adrelid) AS def
+			t.atttypid AS typid, dd.atttypid AS dtypid
 		FROM pg_attribute t
 		LEFT JOIN pg_attribute dd ON dd.attrelid = have AND dd.attnum = t.attnum
-		LEFT JOIN pg_attrdef ad ON ad.adrelid = t.attrelid AND ad.adnum = t.attnum
 		WHERE t.attrelid = rel AND t.attnum > 0 ORDER BY t.attnum
 	LOOP
 		IF a.dname IS NULL THEN
@@ -423,12 +445,28 @@ BEGIN
 				EXECUTE format('ALTER TABLE %s ADD COLUMN %I int', have, '_dropped_' || a.attnum);
 				EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, '_dropped_' || a.attnum);
 			ELSE
-				EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s%s', have, a.attname, a.typ,
-					coalesce(' DEFAULT ' || a.def, ''));
+				EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s', have, a.attname, a.typ);
+				-- the default, as a value, never as the owner's expression (see above)
+				UPDATE pg_attribute d SET atthasmissing = true, attmissingval = p.attmissingval
+				FROM pg_attribute p
+				WHERE p.attrelid = rel AND p.attnum = a.attnum AND p.atthasmissing
+					AND d.attrelid = have AND d.attnum = a.attnum;
 			END IF;
 		ELSIF a.attisdropped AND NOT a.ddropped THEN
 			EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, a.dname);
 		ELSIF NOT a.attisdropped AND a.typ <> a.dtyp THEN
+			-- Rows already in the delta store are converted only when that runs none of the
+			-- owner's code: a new typmod, a domain to its base type, a binary-coercible cast.
+			IF NOT (a.typid = a.dtypid OR a.typid = snouttime._base_type(a.dtypid)
+				OR EXISTS (SELECT 1 FROM pg_cast c WHERE c.castsource = a.dtypid
+					AND c.casttarget = a.typid AND c.castmethod = 'b')) THEN
+				EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', have) INTO busy;
+				IF busy THEN
+					RAISE EXCEPTION 'the delta store of % holds rows that changing % to % would have to cast', rel, a.attname, a.typ
+						USING ERRCODE = 'object_not_in_prerequisite_state',
+						HINT = 'Reseal the table first (snouttime.reseal()), then change the column.';
+				END IF;
+			END IF;
 			EXECUTE format('ALTER TABLE %s ALTER COLUMN %I TYPE %s', have, a.dname, a.typ);
 		END IF;
 	END LOOP;

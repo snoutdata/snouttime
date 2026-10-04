@@ -7,10 +7,12 @@
 -- worker running is a database whose jobs are simply not running rather than one that
 -- behaves differently.
 --
--- A job runs as the OWNER of the table it acts on (`SET LOCAL ROLE`), never as the
--- superuser the worker happens to be. So a job can do exactly what its owner could do by
--- hand, and a row in `jobs` naming someone else's table cannot exist in the first place
--- (the catalog's guard trigger).
+-- A job runs as the OWNER of the table it acts on, never as the superuser the worker happens
+-- to be, and inside a security-restricted operation (`snouttime._run_job`, jobs.rs), so code
+-- the owner wrote that runs during the job (a trigger, an index expression, a rollup's query)
+-- cannot step back out to the superuser with RESET ROLE. So a job can do exactly what its
+-- owner could do by hand, and a row in `jobs` naming someone else's table cannot exist in the
+-- first place (the catalog's guard trigger).
 
 
 -- Reconstruct a partition's range from the name SnoutTime gave it. Partitions made by
@@ -367,13 +369,17 @@ $$;
 --
 -- The row is taken with FOR UPDATE SKIP LOCKED, so several workers (or a worker and a
 -- person) can call this at once without doing the same job twice.
+--
+-- A caller only ever takes a job on a table it may manage (the guard trigger's test), so a
+-- role that is not a superuser runs its own jobs and can neither run nor fail anyone else's
+-- early. Nothing before `_run_job` runs anything but reads of the catalog: no identifier a
+-- table's owner wrote reaches a statement here.
 CREATE FUNCTION snouttime.run_due_job() RETURNS boolean
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
 	j record;
-	owner_name text;
 	started timestamptz := pg_catalog.clock_timestamp();
 	outcome record;
 	detail text;
@@ -381,6 +387,7 @@ DECLARE
 BEGIN
 	SELECT * INTO j FROM snouttime.jobs
 	WHERE enabled AND next_run <= pg_catalog.now()
+		AND coalesce(snouttime._may_manage(target), false)
 	ORDER BY next_run
 	FOR UPDATE SKIP LOCKED
 	LIMIT 1;
@@ -388,23 +395,16 @@ BEGIN
 		RETURN false;
 	END IF;
 
-	SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO owner_name
-	FROM pg_catalog.pg_class c WHERE c.oid = j.target;
-
 	BEGIN
-		IF owner_name IS NOT NULL THEN
-			EXECUTE pg_catalog.format('SET LOCAL ROLE %I', owner_name);
-		END IF;
-		SELECT * INTO outcome FROM snouttime._do_job(j.kind, j.target);
+		SELECT * INTO outcome FROM snouttime._run_job(j.kind, j.target);
 		detail := outcome.detail;
 		again := outcome.again;
-		RESET ROLE;
 		INSERT INTO snouttime.job_runs (kind, target, started_at, finished_at, ok, detail)
 		VALUES (j.kind, j.target, started, pg_catalog.clock_timestamp(), true, detail);
 	EXCEPTION WHEN OTHERS THEN
 		-- A job that fails is recorded and rescheduled; it must not stop the others, and
-		-- the transaction has to survive to write the log line.
-		RESET ROLE;
+		-- the transaction has to survive to write the log line. Leaving this block rolls
+		-- back everything the job did and puts the caller's identity back.
 		INSERT INTO snouttime.job_runs (kind, target, started_at, finished_at, ok, detail)
 		VALUES (j.kind, j.target, started, pg_catalog.clock_timestamp(), false, SQLERRM);
 	END;
@@ -418,6 +418,7 @@ BEGIN
 END
 $$;
 
--- The worker (and anyone else) may run jobs; who may CHANGE them is the guard trigger's
--- business, and what a job may do is its table owner's privileges.
+-- The worker (and anyone else) may run jobs, each only those on tables it may manage; who
+-- may CHANGE them is the guard trigger's business, and what a job may do is its table
+-- owner's privileges.
 GRANT EXECUTE ON FUNCTION snouttime.run_due_job() TO PUBLIC;

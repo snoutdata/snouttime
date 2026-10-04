@@ -226,18 +226,43 @@ $$;
 -- The statement-level trigger on a rollup's source: log the time range the statement touched,
 -- once per rollup built on this table. SECURITY DEFINER because the writer need not own the
 -- rollups whose invalidation log this writes to; it writes nothing but ranges of this table.
+--
+-- Because it runs as the extension's owner, it reads nothing a table's owner could choose
+-- (2026-10-04). Anyone who owns a table may attach this function to it as a trigger of their
+-- own, with arguments of their own and without transition tables, and then `new_rows` would
+-- have been looked up in pg_temp, where a temporary view of theirs could run their code as
+-- the superuser. So it acts only as one of the four triggers _install_invalidation makes,
+-- whose transition tables are new_rows and old_rows, and only on the table's real time
+-- column, of a type whose min() and max() are the server's own.
 CREATE FUNCTION snouttime._invalidate() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-	col text := TG_ARGV[0];
-	t regtype := TG_ARGV[1]::regtype;
+	col name;
+	t regtype;
+	tg record;
 	lo text;
 	hi text;
 	lo2 text;
 	hi2 text;
 BEGIN
+	SELECT g.tgname, g.tgnewtable, g.tgoldtable INTO tg
+	FROM pg_trigger g WHERE g.tgrelid = TG_RELID AND g.tgname = TG_NAME;
+	IF tg.tgname IS NULL OR TG_NAME <> 'snouttime_invalidate_' || lower(TG_OP)
+		OR (TG_OP IN ('INSERT', 'UPDATE') AND tg.tgnewtable IS DISTINCT FROM 'new_rows')
+		OR (TG_OP IN ('DELETE', 'UPDATE') AND tg.tgoldtable IS DISTINCT FROM 'old_rows') THEN
+		RAISE EXCEPTION 'snouttime._invalidate() runs only as the triggers snouttime.create_rollup() makes'
+			USING ERRCODE = 'insufficient_privilege';
+	END IF;
+	SELECT a.attname, a.atttypid::regtype INTO col, t
+	FROM pg_attribute a
+	WHERE a.attrelid = TG_RELID AND a.attname = TG_ARGV[0] AND a.attnum > 0 AND NOT a.attisdropped
+		AND a.atttypid IN ('timestamptz'::regtype, 'timestamp'::regtype, 'date'::regtype,
+			'smallint'::regtype, 'integer'::regtype, 'bigint'::regtype);
+	IF col IS NULL THEN
+		RAISE EXCEPTION 'snouttime._invalidate(): % has no time column %', TG_RELID::regclass, TG_ARGV[0];
+	END IF;
 	IF TG_OP = 'TRUNCATE' THEN
 		-- everything: refresh_rollup reads the extreme keys as "from the first bucket it has"
 		INSERT INTO snouttime.invalidations (rollup, lo, hi)
@@ -245,10 +270,10 @@ BEGIN
 		RETURN NULL;
 	END IF;
 	IF TG_OP IN ('INSERT', 'UPDATE') THEN
-		EXECUTE format('SELECT min(%I)::text, max(%I)::text FROM new_rows', col, col) INTO lo, hi;
+		EXECUTE format('SELECT pg_catalog.min(%I)::text, pg_catalog.max(%I)::text FROM new_rows', col, col) INTO lo, hi;
 	END IF;
 	IF TG_OP IN ('DELETE', 'UPDATE') THEN
-		EXECUTE format('SELECT min(%I)::text, max(%I)::text FROM old_rows', col, col) INTO lo2, hi2;
+		EXECUTE format('SELECT pg_catalog.min(%I)::text, pg_catalog.max(%I)::text FROM old_rows', col, col) INTO lo2, hi2;
 	END IF;
 	IF lo IS NULL AND lo2 IS NULL THEN
 		RETURN NULL;

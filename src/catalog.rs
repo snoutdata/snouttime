@@ -36,7 +36,22 @@
 //! here therefore run as their caller, and the trigger is the one place the rule lives.
 //! A trigger does not change what `pg_dump` reads.
 //!
-//! `job_runs` is written only by the background worker and stays read-only to everyone else.
+//! Every table a row names is checked, before and after an UPDATE (the rollup's materialized
+//! table included), so a role can neither forge a row about someone else's table nor re-point
+//! one at its own. What an owner CAN write by hand is only ever about its own tables, and is
+//! only ever acted on as that owner: the jobs run as the table's owner in a restricted
+//! context (`snouttime._run_job`, jobs.rs), and the extension's SECURITY DEFINER functions
+//! read nothing an owner wrote but OIDs and names they quote. Writes through the API
+//! functions only (PUBLIC losing INSERT/UPDATE/DELETE) were weighed and not taken: those
+//! functions run as their caller, so they would all have to become SECURITY DEFINER, which
+//! is the design the paragraph above rejects, and a hand-written row gains its author nothing
+//! the API would not give them (reviewed 2026-10-04, PLAN.md Log).
+//!
+//! `job_runs` is written only by whoever runs the jobs as a superuser (the background worker)
+//! and stays read-only to everyone else. A role that is not a superuser calling
+//! `run_due_job()` takes only jobs on tables it may manage, and can record one only if it may
+//! write `job_runs` (`pg_write_all_data`); a table's owner runs a job by hand through its own
+//! function (`premake`, `migrate`, `apply_retention`, `seal`, `refresh_rollup`).
 
 use pgrx::prelude::*;
 
@@ -169,29 +184,44 @@ DECLARE
 	row_ record;
 	rels regclass[];
 	rel regclass;
+	pass int;
 BEGIN
-	IF TG_OP = 'DELETE' THEN row_ := OLD; ELSE row_ := NEW; END IF;
-	-- IF, not CASE: a CASE naming row_.relid fails on a table without that column even in
-	-- a branch that is never taken.
-	IF TG_TABLE_NAME IN ('series', 'seal_sizes') THEN
-		rels := ARRAY[row_.relid];
-	ELSIF TG_TABLE_NAME = 'rollups' THEN
-		rels := ARRAY[row_.relid, row_.source];
-	ELSIF TG_TABLE_NAME = 'invalidations' THEN
-		rels := ARRAY[row_.rollup];
-	ELSE
-		rels := ARRAY[row_.target];
-	END IF;
-	FOREACH rel IN ARRAY rels LOOP
-		-- A NULL answer means the table no longer exists. Removing a row about a table that
-		-- is gone harms nobody (it is how cleanup after a DROP works); writing one is refused.
-		IF TG_OP = 'DELETE' AND snouttime._may_manage(rel) IS NULL THEN
-			CONTINUE;
+	-- Pass 1 is the row as it was (UPDATE, DELETE), pass 2 the row as it will be (INSERT,
+	-- UPDATE). An UPDATE is checked both ways: checking only the new row let a role re-point a
+	-- row about somebody else's table at a table of its own, which removed that registration
+	-- (found 2026-10-04).
+	FOR pass IN 1..2 LOOP
+		IF pass = 1 THEN
+			CONTINUE WHEN TG_OP = 'INSERT';
+			row_ := OLD;
+		ELSE
+			EXIT WHEN TG_OP = 'DELETE';
+			row_ := NEW;
 		END IF;
-		IF NOT coalesce(snouttime._may_manage(rel), false) THEN
-			RAISE EXCEPTION 'permission denied: only the owner of % may change its SnoutTime settings', rel
-				USING ERRCODE = 'insufficient_privilege';
+		-- IF, not CASE: a CASE naming row_.relid fails on a table without that column even in
+		-- a branch that is never taken.
+		IF TG_TABLE_NAME IN ('series', 'seal_sizes') THEN
+			rels := ARRAY[row_.relid];
+		ELSIF TG_TABLE_NAME = 'rollups' THEN
+			-- the materialized table too: refresh_rollup and drop_rollup write and drop it
+			rels := ARRAY[row_.relid, row_.source, row_.materialized];
+		ELSIF TG_TABLE_NAME = 'invalidations' THEN
+			rels := ARRAY[row_.rollup];
+		ELSE
+			rels := ARRAY[row_.target];
 		END IF;
+		FOREACH rel IN ARRAY rels LOOP
+			-- A NULL answer means the table no longer exists. Removing or changing a row about a
+			-- table that is gone harms nobody (it is how cleanup after a DROP works); a row that
+			-- names one is never written.
+			IF pass = 1 AND snouttime._may_manage(rel) IS NULL THEN
+				CONTINUE;
+			END IF;
+			IF NOT coalesce(snouttime._may_manage(rel), false) THEN
+				RAISE EXCEPTION 'permission denied: only the owner of % may change its SnoutTime settings', rel
+					USING ERRCODE = 'insufficient_privilege';
+			END IF;
+		END LOOP;
 	END LOOP;
 	IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
 	RETURN NEW;
