@@ -1,103 +1,12 @@
--- Series tables. See series.rs for why this is SQL.
+-- SnoutTime 0.1.7 -> 0.1.8 (2026-10-05).
 --
--- How a table becomes a series table:
---
---   1. The ORIGINAL table is renamed to <name>_default and becomes the DEFAULT partition
---      of a new partitioned table that takes the original name. No row moves, so this is
---      as fast on a billion rows as on none, and nothing is ever copied twice.
---   2. Partitions for now() and `premake` intervals ahead are created. Each one takes the
---      rows of its range out of the default partition as it is made.
---   3. Whatever older data is left in the default partition moves into proper partitions
---      one partition per transaction (`CALL snouttime.migrate(...)`, and later the worker),
---      so no lock is held for the whole copy.
---
--- Every function here runs as its CALLER (no SECURITY DEFINER): it can do only what the
--- caller could do to the table by hand, and the catalog's guard trigger enforces the same
--- rule on the registration (catalog.rs, "Who may write"). The one exception is the drop
--- cleanup at the end, which only ever deletes rows about tables that no longer exist.
+-- No change in behaviour. The comments inside four functions are reworded so they explain
+-- themselves; function bodies are part of the catalog, so the new text arrives this way and an
+-- upgraded database ends with exactly the catalog a fresh install makes.
 
+\echo Use "ALTER EXTENSION snouttime UPDATE TO '0.1.8'" to load this file. \quit
 
--- The partition [lo, hi) that holds a value, as literals the time column's type accepts,
--- and the suffix that partition is named with.
---
--- Partitions of the time types are aligned in UTC to 2000-01-01 (date_bin's origin), or to
--- month starts for an interval made of months, so the same interval always produces the
--- same boundaries whatever the session's time zone.
-CREATE FUNCTION snouttime._range_for(s snouttime.series, v text,
-	OUT lo text, OUT hi text, OUT suffix text)
-LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	x int8;
-	w int8;
-	t timestamptz;
-	b timestamptz;
-	e timestamptz;
-	months int;
-	k int;
-	fmt text;
-BEGIN
-	IF s.partition_width IS NOT NULL THEN
-		x := v::int8;
-		w := s.partition_width;
-		x := x - (((x % w) + w) % w);
-		lo := x::text;
-		hi := (x + w)::text;
-		suffix := CASE WHEN x < 0 THEN 'pm' || (-x)::text ELSE 'p' || x::text END;
-		RETURN;
-	END IF;
-
-	t := CASE s.time_type
-		WHEN 'timestamptz'::regtype THEN v::timestamptz
-		WHEN 'timestamp'::regtype THEN v::timestamp AT TIME ZONE 'UTC'
-		ELSE v::date::timestamp AT TIME ZONE 'UTC'
-	END;
-
-	months := extract(year FROM s.partition_interval)::int * 12
-		+ extract(month FROM s.partition_interval)::int;
-	IF months > 0 THEN
-		k := (extract(year FROM t AT TIME ZONE 'UTC')::int - 2000) * 12
-			+ extract(month FROM t AT TIME ZONE 'UTC')::int - 1;
-		k := k - (((k % months) + months) % months);
-		b := make_timestamptz(2000 + floor(k / 12.0)::int, ((k % 12) + 12) % 12 + 1, 1, 0, 0, 0, 'UTC');
-		e := ((b AT TIME ZONE 'UTC') + s.partition_interval) AT TIME ZONE 'UTC';
-	ELSE
-		b := date_bin(s.partition_interval, t, timestamptz '2000-01-01 00:00:00+00');
-		e := b + s.partition_interval;
-	END IF;
-
-	-- ISO 8601 with an explicit offset: parsed the same way whatever DateStyle says.
-	IF s.time_type = 'timestamptz'::regtype THEN
-		lo := to_char(b AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '+00';
-		hi := to_char(e AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '+00';
-	ELSIF s.time_type = 'timestamp'::regtype THEN
-		lo := to_char(b AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US');
-		hi := to_char(e AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US');
-	ELSE
-		lo := to_char(b AT TIME ZONE 'UTC', 'YYYY-MM-DD');
-		hi := to_char(e AT TIME ZONE 'UTC', 'YYYY-MM-DD');
-	END IF;
-
-	fmt := CASE WHEN s.partition_interval < interval '1 day' THEN 'YYYYMMDD"_"HH24MISS' ELSE 'YYYYMMDD' END;
-	suffix := 'p' || to_char(b AT TIME ZONE 'UTC', fmt);
-END
-$$;
-
-
--- The default partition of a partitioned table, or NULL.
-CREATE FUNCTION snouttime._default_partition(parent regclass) RETURNS regclass
-LANGUAGE sql STABLE
-SET search_path = pg_catalog, pg_temp
-AS $$
-	SELECT nullif(partdefid, 0)::regclass FROM pg_partitioned_table WHERE partrelid = parent
-$$;
-
-
--- Make sure the partition holding value `v` exists, moving that range's rows out of the
--- default partition as it is made. Returns the partition, or NULL when a partition that
--- SnoutTime did not make already covers part of the range (it is left alone).
-CREATE FUNCTION snouttime._make_partition(parent regclass, v text, attach boolean DEFAULT true)
+CREATE OR REPLACE FUNCTION snouttime._make_partition(parent regclass, v text, attach boolean DEFAULT true)
 RETURNS regclass
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -259,141 +168,7 @@ BEGIN
 END
 $$;
 
-
--- Make the partition holding now() and `premake` more after it. For an integer time
--- column there is no "now", so it counts ahead from the largest value in the table, and
--- does nothing on an empty one. Returns how many partitions it created.
-CREATE FUNCTION snouttime.premake(relation regclass) RETURNS integer
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	s snouttime.series;
-	before int;
-	anchor text;
-	top int8;
-	i int;
-BEGIN
-	SELECT * INTO s FROM snouttime.series WHERE relid = relation;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a series table', relation;
-	END IF;
-	SELECT count(*) INTO before FROM pg_inherits WHERE inhparent = relation;
-
-	IF s.partition_width IS NOT NULL THEN
-		EXECUTE format('SELECT max(%I)::int8 FROM %s', s.time_column, relation) INTO top;
-		IF top IS NULL THEN
-			RETURN 0;
-		END IF;
-		FOR i IN 0 .. s.premake LOOP
-			PERFORM snouttime._make_partition(relation, (top + i * s.partition_width)::text);
-		END LOOP;
-	ELSE
-		FOR i IN 0 .. s.premake LOOP
-			anchor := CASE s.time_type
-				WHEN 'timestamptz'::regtype THEN (now() + i * s.partition_interval)::text
-				ELSE ((now() AT TIME ZONE 'UTC') + i * s.partition_interval)::text
-			END;
-			PERFORM snouttime._make_partition(relation, anchor);
-		END LOOP;
-	END IF;
-
-	RETURN (SELECT count(*) FROM pg_inherits WHERE inhparent = relation) - before;
-END
-$$;
-
-
--- Make every partition covering [lo, hi), for loading data that is not from today.
---
--- `premake` only ever looks ahead of now(), which is right for a table being written to
--- and wrong for a bulk load of last year's data: without this, every row lands in the
--- default partition and is migrated out afterwards, one partition at a time. Values are
--- given as text and read as the time column's own type. Returns how many it made.
-CREATE FUNCTION snouttime.make_partitions(relation regclass, lo text, hi text) RETURNS integer
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	s snouttime.series;
-	before int;
-	r record;
-	cursor_ text;
-	guard int := 0;
-BEGIN
-	SELECT * INTO s FROM snouttime.series WHERE relid = relation;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a series table', relation;
-	END IF;
-	SELECT count(*) INTO before FROM pg_inherits WHERE inhparent = relation;
-
-	cursor_ := lo;
-	LOOP
-		SELECT * INTO r FROM snouttime._range_for(s, cursor_);
-		-- Past the end? The range holding `hi` is not included: [lo, hi).
-		IF s.partition_width IS NOT NULL THEN
-			EXIT WHEN r.lo::int8 >= hi::int8;
-		ELSIF s.time_type = 'timestamptz'::regtype THEN
-			EXIT WHEN r.lo::timestamptz >= hi::timestamptz;
-		ELSE
-			EXIT WHEN r.lo::timestamp >= hi::timestamp;
-		END IF;
-
-		PERFORM snouttime._make_partition(relation, cursor_);
-		cursor_ := r.hi;
-
-		guard := guard + 1;
-		IF guard > 100000 THEN
-			RAISE EXCEPTION 'make_partitions: more than 100000 partitions between % and %', lo, hi
-				USING HINT = 'That is almost always the wrong partition_interval rather than the intent.';
-		END IF;
-	END LOOP;
-
-	RETURN (SELECT count(*) FROM pg_inherits WHERE inhparent = relation) - before;
-END
-$$;
-
-
--- The jobs every series table wants doing: partitions made ahead of time, and, while its
--- default partition still holds rows, one partition's worth moved out per run. Both are
--- idempotent, and `jobs.sql` is what runs them.
-CREATE FUNCTION snouttime._ensure_jobs(relation regclass) RETURNS void
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	s snouttime.series;
-	every interval;
-	def regclass;
-	rows_left boolean;
-BEGIN
-	SELECT * INTO s FROM snouttime.series WHERE relid = relation;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a series table', relation;
-	END IF;
-	-- Often enough that a partition is never missing, rarely enough to cost nothing: a
-	-- tenth of the partition interval, between a minute and an hour.
-	IF s.partition_interval IS NULL THEN
-		every := interval '1 hour';
-	ELSE
-		every := greatest(interval '1 minute', least(interval '1 hour', s.partition_interval / 10));
-	END IF;
-	INSERT INTO snouttime.jobs (kind, target, schedule) VALUES ('premake', relation, every)
-	ON CONFLICT (kind, target) DO UPDATE SET schedule = excluded.schedule;
-
-	def := snouttime._default_partition(relation);
-	rows_left := false;
-	IF def IS NOT NULL THEN
-		EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', def) INTO rows_left;
-	END IF;
-	IF rows_left THEN
-		INSERT INTO snouttime.jobs (kind, target, schedule) VALUES ('migrate', relation, interval '1 minute')
-		ON CONFLICT (kind, target) DO NOTHING;
-	END IF;
-END
-$$;
-
-
-CREATE FUNCTION snouttime.create_series(
+CREATE OR REPLACE FUNCTION snouttime.create_series(
 	relation regclass,
 	time_column name,
 	partition_interval interval DEFAULT NULL,
@@ -749,255 +524,246 @@ BEGIN
 END
 $$;
 
-
--- How many ranges one migration transaction moves (chosen
--- 2026-09-23): enough that the whole default partition is moved in about eight
--- transactions, whatever its span. Estimated from the oldest and newest row, which the
--- time index answers without a scan.
-CREATE FUNCTION snouttime._migrate_width(s snouttime.series, oldest text, newest text)
-RETURNS integer
-LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	ranges numeric;
-BEGIN
-	IF s.partition_width IS NOT NULL THEN
-		ranges := (newest::numeric - oldest::numeric) / s.partition_width + 1;
-	ELSE
-		ranges := extract(epoch FROM newest::timestamptz - oldest::timestamptz)
-			/ greatest(extract(epoch FROM s.partition_interval), 1) + 1;
-	END IF;
-	RETURN greatest(1, ceil(ranges / 8))::int;
-END
-$$;
-
-
--- Move the rows of up to `max_ranges` partition ranges out of the default partition, in
--- the caller's transaction.
---
--- Attaching a partition to a table that has a default partition makes Postgres scan the
--- default partition, to prove no row there belongs to the new range, unless a VALIDATED
--- constraint on it already says so. Attached one per transaction, N partitions cost N
--- scans of the original table (moved rows stay behind as dead tuples until vacuum):
--- measured at 4.2x the cost of the copy itself for 278 hourly partitions. So the rows of
--- several ranges are moved first, ONE constraint excluding all of them is added to the
--- default partition (one scan), every partition is attached without a scan, and the
--- constraint is dropped again. No row is ever invisible to a query on the table.
---
--- Returns how many partitions were attached, and the first value it could not place,
--- when a partition SnoutTime did not make covers it.
-CREATE FUNCTION snouttime._migrate_batch(parent regclass, max_ranges integer DEFAULT NULL,
-	OUT moved integer, OUT stopped_at text)
+CREATE OR REPLACE FUNCTION snouttime._do_job(job_kind text, rel regclass,
+	OUT detail text, OUT again boolean)
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
+	-- The parameters are NOT called kind and target: those are columns of
+	-- snouttime.jobs, and a bare reference to one in a statement against that table is
+	-- ambiguous (found by the jobs regression test, 2026-09-22).
 	s snouttime.series;
 	def regclass;
-	col text;
-	oldest text;
-	newest text;
-	k int;
-	r record;
+	mb record;
+	n int;
+	found_rows boolean;
 	part regclass;
-	parts regclass[] := '{}';
-	los text[] := '{}';
-	his text[] := '{}';
-	failed regclass[] := '{}';
-	cond text;
-	i int;
 BEGIN
-	moved := 0;
-	SELECT * INTO s FROM snouttime.series WHERE relid = parent;
-	def := snouttime._default_partition(parent);
-	IF def IS NULL THEN
+	again := false;
+	IF job_kind = 'refresh' THEN
+		-- a rollup (rollup.sql): the target is its view, not a series table
+		n := snouttime.refresh_rollup(rel);
+		detail := n || CASE n WHEN 1 THEN ' range of buckets recomputed' ELSE ' ranges of buckets recomputed' END;
 		RETURN;
 	END IF;
-	col := quote_ident(s.time_column);
-	EXECUTE format('SELECT min(%s)::text, max(%s)::text FROM %s', col, col, def) INTO oldest, newest;
-	IF oldest IS NULL THEN
+	SELECT * INTO s FROM snouttime.series WHERE relid = rel;
+	IF NOT FOUND THEN
+		detail := 'skipped: not a series table';
 		RETURN;
 	END IF;
 
-	-- A replicated table moves one range at a time through the parent (see _make_partition).
-	IF EXISTS (SELECT 1 FROM pg_publication_rel pr WHERE pr.prrelid IN (parent, def))
-		OR EXISTS (SELECT 1 FROM pg_publication WHERE puballtables) THEN
-		part := snouttime._make_partition(parent, oldest);
-		IF part IS NULL THEN
-			stopped_at := oldest;
+	IF job_kind = 'premake' THEN
+		n := snouttime.premake(rel);
+		detail := n || ' partitions made';
+		-- Rows that arrive AFTER the table was converted (a late write, a far-future one) land
+		-- in the default partition too, and the migrate job that swept the conversion's rows
+		-- removed itself when it was done. So this job, which runs on every series table on a
+		-- schedule, is what notices them and puts the migrate job back. EXISTS reads at most
+		-- one row. (Found 2026-09-23 by tests/soak/soak.sh: until then, only the rows present
+		-- at create_series were ever swept.)
+		def := snouttime._default_partition(rel);
+		IF def IS NOT NULL THEN
+			EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', def) INTO found_rows;
+			IF found_rows THEN
+				INSERT INTO snouttime.jobs (kind, target, schedule) VALUES ('migrate', rel, interval '1 minute')
+				ON CONFLICT (kind, target) DO UPDATE SET next_run = least(snouttime.jobs.next_run, now());
+				detail := detail || '; rows waiting in the default partition, migrate scheduled';
+			END IF;
+		END IF;
+		RETURN;
+	ELSIF job_kind = 'retention' THEN
+		n := snouttime.apply_retention(rel);
+		detail := n || ' partitions dropped';
+		-- Dropping is cheap and a retention backlog is usually many partitions at once.
+		again := n > 0;
+		RETURN;
+	ELSIF job_kind = 'seal' THEN
+		-- One partition per run (seal.sql). A seal waits at most five seconds for its lock
+		-- and gives up rather than queue behind a user's long transaction; the next
+		-- run tries again.
+		PERFORM set_config('lock_timeout', '5s', true);
+		part := snouttime._next_to_seal(s);
+		IF part IS NOT NULL THEN
+			n := snouttime.seal(part);
+			detail := 'sealed ' || part::text || CASE WHEN n > 1 THEN ' (' || n || ' tables)' ELSE '' END;
+			again := true;
+			RETURN;
+		END IF;
+		part := snouttime._next_to_reseal(s);
+		IF part IS NOT NULL THEN
+			PERFORM snouttime.reseal(part);
+			detail := 'resealed ' || part::text;
+			again := true;
+			RETURN;
+		END IF;
+		detail := 'nothing to seal';
+		RETURN;
+	ELSIF job_kind = 'tier' THEN
+		-- One partition per run, like sealing, and the same lock rule.
+		PERFORM set_config('lock_timeout', '5s', true);
+		part := snouttime._next_to_tier(s);
+		IF part IS NOT NULL THEN
+			n := snouttime.tier(part);
+			detail := 'tiered ' || part::text;
+			again := true;
+			RETURN;
+		END IF;
+		IF current_setting('snouttime.tier_gc', true) = 'on' THEN
+			detail := 'nothing to tier; ' || snouttime.tier_gc() || ' orphaned objects deleted';
 		ELSE
-			moved := 1;
+			detail := 'nothing to tier';
 		END IF;
 		RETURN;
-	END IF;
-
-	k := coalesce(max_ranges, snouttime._migrate_width(s, oldest, newest));
-	WHILE oldest IS NOT NULL AND coalesce(array_length(parts, 1), 0) < k LOOP
-		SELECT * INTO r FROM snouttime._range_for(s, oldest);
-		part := snouttime._make_partition(parent, oldest, attach => false);
-		IF EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = part) THEN
-			-- a partition by this name is already attached: nothing of ours to move
-			EXIT;
+	ELSIF job_kind = 'migrate' THEN
+		-- One batch of partitions per run (_migrate_batch: about an eighth of the default
+		-- partition's span), so a job never holds its locks for the whole move. When the
+		-- default partition is empty there is nothing left to do and the job removes itself.
+		def := snouttime._default_partition(rel);
+		IF def IS NULL THEN
+			DELETE FROM snouttime.jobs j WHERE j.kind = 'migrate' AND j.target = rel;
+			detail := 'no default partition';
+			RETURN;
 		END IF;
-		parts := parts || part;
-		los := los || r.lo;
-		his := his || r.hi;
-		EXECUTE format('SELECT min(%s)::text FROM %s', col, def) INTO oldest;
-	END LOOP;
-	IF coalesce(array_length(parts, 1), 0) = 0 THEN
+		SELECT * INTO mb FROM snouttime._migrate_batch(rel);
+		IF mb.stopped_at IS NOT NULL THEN
+			DELETE FROM snouttime.jobs j WHERE j.kind = 'migrate' AND j.target = rel;
+			detail := 'stopped: rows from ' || mb.stopped_at || ' fall in a range covered by a partition SnoutTime did not make';
+			RETURN;
+		END IF;
+		IF mb.moved = 0 THEN
+			DELETE FROM snouttime.jobs j WHERE j.kind = 'migrate' AND j.target = rel;
+			detail := 'default partition is empty';
+			RETURN;
+		END IF;
+		detail := 'moved rows into ' || mb.moved || CASE mb.moved WHEN 1 THEN ' partition' ELSE ' partitions' END;
+		again := true;   -- there may be more in the default partition; do not wait a pass
 		RETURN;
 	END IF;
-
-	SELECT string_agg(format('(%s < %L OR %s >= %L)', col, los[j], col, his[j]), ' AND ')
-	INTO cond FROM generate_subscripts(los, 1) AS j;
-	EXECUTE format('ALTER TABLE %s ADD CONSTRAINT snouttime_moving CHECK (%s)', def, cond);
-	FOR i IN 1 .. array_length(parts, 1) LOOP
-		BEGIN
-			EXECUTE format('ALTER TABLE %s ATTACH PARTITION %s FOR VALUES FROM (%L) TO (%L)',
-				parent, parts[i], los[i], his[i]);
-			EXECUTE format('ALTER TABLE %s DROP CONSTRAINT snouttime_bounds', parts[i]);
-			moved := moved + 1;
-		EXCEPTION WHEN invalid_object_definition THEN
-			-- "would overlap partition": somebody else's partition covers this range
-			failed := failed || parts[i];
-			stopped_at := coalesce(stopped_at, los[i]);
-		END;
-	END LOOP;
-	EXECUTE format('ALTER TABLE %s DROP CONSTRAINT snouttime_moving', def);
-	-- Rows that could not be placed go back where they came from.
-	FOREACH part IN ARRAY failed LOOP
-		EXECUTE format('INSERT INTO %s SELECT * FROM %s', def, part);
-		EXECUTE format('DROP TABLE %s', part);
-	END LOOP;
+	detail := 'skipped: unknown job';
 END
 $$;
 
-
--- Move rows out of a series table's default partition into proper partitions, oldest
--- first, several partitions per transaction (_migrate_batch), so the whole move is about
--- eight transactions and no lock is held for all of it.
--- `batches` limits how many transactions it runs this call (NULL: until the default is empty).
---
--- Call it outside an explicit transaction block, or it cannot commit between batches. It
--- has no SET search_path, unlike everything else here, because Postgres refuses COMMIT
--- inside a procedure that has one; every name in it is schema-qualified instead.
-CREATE PROCEDURE snouttime.migrate(relation regclass, batches integer DEFAULT NULL)
+CREATE OR REPLACE FUNCTION snouttime.create_rollup(name text, source regclass, bucket interval DEFAULT NULL,
+	select_list text DEFAULT NULL, group_by text DEFAULT NULL, bucket_width bigint DEFAULT NULL)
+RETURNS regclass
 LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
 AS $$
+#variable_conflict use_variable
 DECLARE
 	s snouttime.series;
-	def regclass;
-	oldest text;
-	done int := 0;
-	b record;
+	src snouttime.rollups;
+	r snouttime.rollups;
+	nsp text;
+	view_name regclass;
+	mat regclass;
+	vt text;
+	bad text;
+	item text;
+	col text;
 BEGIN
-	SELECT * INTO s FROM snouttime.series WHERE relid = relation;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a series table', relation;
+	IF select_list IS NULL OR btrim(select_list) = '' THEN
+		RAISE EXCEPTION 'a rollup needs a select list: the aggregates to keep per bucket'
+			USING ERRCODE = 'invalid_parameter_value', HINT = 'For example: max(usage) AS max_usage, count(*) AS n';
 	END IF;
-	def := snouttime._default_partition(relation);
-	IF def IS NULL THEN
-		RETURN;
+	SELECT n.nspname INTO nsp FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = source;
+	SELECT * INTO s FROM snouttime.series WHERE relid = source;
+	SELECT * INTO src FROM snouttime.rollups WHERE relid = source;
+	IF s.relid IS NULL AND src.relid IS NULL THEN
+		RAISE EXCEPTION '% is neither a series table nor a rollup', source
+			USING HINT = 'snouttime.create_series() makes a table a series table.';
 	END IF;
-	LOOP
-		EXIT WHEN batches IS NOT NULL AND done >= batches;
-		SELECT * INTO b FROM snouttime._migrate_batch(relation);
-		IF b.stopped_at IS NOT NULL THEN
-			RAISE EXCEPTION 'rows in % from % onward fall in a range covered by a partition SnoutTime did not make', def, b.stopped_at;
+	r.relid := NULL;
+	r.source := source;
+	r.select_list := select_list;
+	r.group_by := group_by;
+	r.bucket_interval := bucket;
+	r.bucket_width := bucket_width;
+	IF s.relid IS NOT NULL THEN
+		r.time_column := s.time_column;
+		r.time_type := s.time_type;
+	ELSE
+		r.time_column := 'bucket';
+		r.time_type := src.time_type;
+		-- a rollup of a rollup merges the source's aggregates, so each must be mergeable
+		bad := substring(lower(select_list) FROM '\m(avg|percentile_cont|percentile_disc|mode|median|stddev[a-z_]*|var[a-z_]*|count\s*\(\s*distinct)\M');
+		bad := regexp_replace(bad, '\s*\(\s*distinct$', '(DISTINCT)');
+		IF bad IS NOT NULL THEN
+			RAISE EXCEPTION 'a rollup of a rollup merges its source''s aggregates, and % of them is not % of the rows', bad, bad
+				USING ERRCODE = 'invalid_parameter_value',
+				HINT = CASE
+					WHEN bad = 'avg' THEN 'Keep sum() and count() in the source rollup and divide: sum(total) / sum(n).'
+					WHEN bad LIKE 'percentile%' OR bad IN ('mode', 'median') THEN
+						'Keep snouttime.percentile_sketch() in the source rollup, then merge() it here and read snouttime.percentile().'
+					WHEN bad LIKE 'count%' THEN
+						'Keep snouttime.distinct_sketch() in the source rollup, then merge() it here and read snouttime.distinct_count().'
+					ELSE 'Keep sum(), sum of squares and count() in the source rollup and compute it from those.'
+				END;
 		END IF;
-		EXIT WHEN b.moved = 0;
-		done := done + 1;
-		COMMIT;
-	END LOOP;
+	END IF;
+	IF r.time_type IN ('timestamptz'::regtype, 'timestamp'::regtype, 'date'::regtype) THEN
+		IF bucket IS NULL OR bucket_width IS NOT NULL THEN
+			RAISE EXCEPTION 'a rollup over a % column needs a bucket interval', r.time_type USING ERRCODE = 'invalid_parameter_value';
+		END IF;
+	ELSIF bucket_width IS NULL OR bucket IS NOT NULL THEN
+		RAISE EXCEPTION 'a rollup over an integer time column needs bucket_width' USING ERRCODE = 'invalid_parameter_value';
+	END IF;
+
+	EXECUTE format('CREATE TABLE %I.%I AS %s WITH NO DATA', nsp, name || '_materialized',
+		snouttime._rollup_query(r, NULL, NULL));
+	mat := format('%I.%I', nsp, name || '_materialized')::regclass;
+	-- Every column group_by names must come back from the select list, or the rollup's rows
+	-- cannot be told apart: group_by => 'host' with aggregates only made twenty rows an hour
+	-- and no host (2026-09-24, 0.1.1). Plain names only, quoted or not; a group_by with a
+	-- function call in it is left to its author, since its commas are not all separators.
+	IF group_by IS NOT NULL AND strpos(group_by, '(') = 0 THEN
+		FOR item IN SELECT btrim(x) FROM regexp_split_to_table(group_by, ',') AS x LOOP
+			IF item ~ '^[A-Za-z_][A-Za-z0-9_$]*$' THEN
+				col := lower(item);
+			ELSIF item ~ '^"([^"]|"")+"$' THEN
+				col := replace(substr(item, 2, length(item) - 2), '""', '"');
+			ELSE
+				CONTINUE;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_attribute
+					WHERE attrelid = mat AND attname = col AND attnum > 0 AND NOT attisdropped) THEN
+				RAISE EXCEPTION 'group_by names %, but the select list does not return it, so the rollup''s rows could not be told apart', item
+					USING ERRCODE = 'invalid_parameter_value',
+					HINT = format('Put %s in select_list too, for example: %s, %s', item, item, btrim(select_list));
+			END IF;
+		END LOOP;
+	END IF;
+	EXECUTE format('CREATE INDEX ON %s (bucket)', mat);
+	r.materialized := mat;
+	-- Three parts, the watermark and the pending ranges each computed once per query:
+	--   materialized buckets before the watermark, less those with pending invalidations;
+	--   the aggregate over raw rows from the watermark on;
+	--   the aggregate over raw rows of each pending range (a late row shows up at once).
+	-- So the view is never stale, only partly materialized.
+	vt := CASE WHEN r.bucket_width IS NOT NULL THEN 'int8' ELSE r.time_type::text END;
+	EXECUTE format('CREATE VIEW %I.%I AS '
+		'WITH w AS MATERIALIZED (SELECT snouttime._watermark(%L, NULL::%s) AS v), '
+		'p AS MATERIALIZED (SELECT lo, hi FROM snouttime._pending(%L, NULL::%s)) '
+		'SELECT m.* FROM %s m WHERE m.bucket < (SELECT v FROM w) '
+		'AND NOT EXISTS (SELECT 1 FROM p WHERE m.bucket >= p.lo AND m.bucket < p.hi) '
+		'UNION ALL %s '
+		'UNION ALL SELECT x.* FROM p, LATERAL (%s) x',
+		nsp, name, mat::text, vt, mat::text, vt, mat,
+		snouttime._rollup_query(r, '(SELECT v FROM w)', NULL),
+		snouttime._rollup_query(r, 'p.lo', 'p.hi'));
+	view_name := format('%I.%I', nsp, name)::regclass;
+	r.relid := view_name;
+	INSERT INTO snouttime.rollups (relid, source, materialized, time_column, time_type, bucket_interval,
+		bucket_width, select_list, group_by)
+	VALUES (r.relid, r.source, r.materialized, r.time_column, r.time_type, r.bucket_interval,
+		r.bucket_width, r.select_list, r.group_by);
+	IF s.relid IS NOT NULL THEN
+		PERFORM snouttime._install_invalidation(source, s.time_column, s.time_type);
+	END IF;
+	-- the whole history is due for a first refresh
+	INSERT INTO snouttime.jobs (kind, target, schedule) VALUES ('refresh', view_name, interval '1 minute')
+	ON CONFLICT (kind, target) DO NOTHING;
+	RETURN view_name;
 END
 $$;
-
-
--- Drop the default partition, once nothing is left in it.
---
--- It is worth doing and it is not free either way, so it is a decision rather than a
--- default. What it buys: an empty default partition cannot be pruned, so EVERY query that
--- probes the table per row pays an extra index scan for it. Measured at 10M rows on
--- 2026-09-22: an as-of join of 20,811 events took 2,477 ms with the default partition
--- attached and 248 ms without it, ten times faster for a partition holding nothing.
---
--- What it costs: the default partition is the safety net. Without one, an INSERT whose
--- time falls outside every existing partition FAILS instead of landing somewhere and
--- being tidied up later. The worker keeps partitions ahead of now(), so ordinary writes
--- are fine; a backfill of old data is not, and wants `make_partitions` first.
-CREATE FUNCTION snouttime.drop_default(relation regclass) RETURNS boolean
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	def regclass;
-	left_over int8;
-BEGIN
-	IF NOT EXISTS (SELECT 1 FROM snouttime.series WHERE relid = relation) THEN
-		RAISE EXCEPTION '% is not a series table', relation;
-	END IF;
-	def := snouttime._default_partition(relation);
-	IF def IS NULL THEN
-		RETURN false;
-	END IF;
-	EXECUTE format('SELECT count(*) FROM %s', def) INTO left_over;
-	IF left_over > 0 THEN
-		RAISE EXCEPTION '% still holds % rows', def, left_over
-			USING ERRCODE = 'object_not_in_prerequisite_state',
-			HINT = 'CALL snouttime.migrate(...) moves them into partitions first.';
-	END IF;
-	EXECUTE format('ALTER TABLE %s DETACH PARTITION %s', relation, def);
-	EXECUTE format('DROP TABLE %s', def);
-	RETURN true;
-END
-$$;
-
-
--- Stop treating a table as a series table. Its partitions and data stay exactly as they
--- are: it is an ordinary partitioned table afterwards.
-CREATE FUNCTION snouttime.drop_series(relation regclass) RETURNS void
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-BEGIN
-	IF NOT EXISTS (SELECT 1 FROM snouttime.series WHERE relid = relation) THEN
-		RAISE EXCEPTION '% is not a series table', relation;
-	END IF;
-	IF EXISTS (SELECT 1 FROM snouttime.rollups WHERE source = relation) THEN
-		RAISE EXCEPTION '% has rollups; drop them first', relation
-			USING ERRCODE = 'dependent_objects_still_exist';
-	END IF;
-	DELETE FROM snouttime.jobs WHERE target = relation;
-	DELETE FROM snouttime.series WHERE relid = relation;
-END
-$$;
-
-
--- When a table is dropped, forget it. A regclass does not notice a DROP by itself, and a
--- stale OID could one day be reused by an unrelated table. SECURITY DEFINER because the
--- dropping user may not be the catalog's owner; it is safe because the OIDs come from
--- pg_event_trigger_dropped_objects(), which a caller cannot forge.
-CREATE FUNCTION snouttime._on_drop() RETURNS event_trigger
-LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	dropped oid[];
-BEGIN
-	SELECT array_agg(objid) INTO dropped
-	FROM pg_event_trigger_dropped_objects()
-	WHERE classid = 'pg_class'::regclass AND objsubid = 0;
-	IF dropped IS NULL THEN
-		RETURN;
-	END IF;
-	DELETE FROM snouttime.invalidations WHERE rollup::oid = ANY (dropped);
-	DELETE FROM snouttime.jobs WHERE target::oid = ANY (dropped);
-	DELETE FROM snouttime.seal_sizes WHERE relid::oid = ANY (dropped);
-	DELETE FROM snouttime.rollups WHERE relid::oid = ANY (dropped) OR source::oid = ANY (dropped)
-		OR materialized::oid = ANY (dropped);
-	DELETE FROM snouttime.series WHERE relid::oid = ANY (dropped);
-END
-$$;
-
-CREATE EVENT TRIGGER snouttime_on_drop ON sql_drop EXECUTE FUNCTION snouttime._on_drop();

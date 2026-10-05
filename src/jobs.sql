@@ -299,7 +299,7 @@ BEGIN
 		RETURN;
 	ELSIF job_kind = 'seal' THEN
 		-- One partition per run (seal.sql). A seal waits at most five seconds for its lock
-		-- and gives up rather than queue behind a user's long transaction (D10); the next
+		-- and gives up rather than queue behind a user's long transaction; the next
 		-- run tries again.
 		PERFORM set_config('lock_timeout', '5s', true);
 		part := snouttime._next_to_seal(s);
@@ -319,7 +319,7 @@ BEGIN
 		detail := 'nothing to seal';
 		RETURN;
 	ELSIF job_kind = 'tier' THEN
-		-- One partition per run, like sealing, and the same lock rule (D10).
+		-- One partition per run, like sealing, and the same lock rule.
 		PERFORM set_config('lock_timeout', '5s', true);
 		part := snouttime._next_to_tier(s);
 		IF part IS NOT NULL THEN

@@ -664,7 +664,7 @@ BEGIN
 			ELSE format(' PARTITION BY HASH (%I)', s.space_column) END);
 	part := format('%I.%I', nsp, part_name)::regclass;
 	-- A space key means this partition is itself partitioned, so it needs children of its
-	-- own before a row can land in it (PLAN.md 1.4).
+	-- own before a row can land in it.
 	IF s.space_column IS NOT NULL THEN
 		FOR h IN 0 .. s.space_partitions - 1 LOOP
 			EXECUTE format('CREATE TABLE %I.%I PARTITION OF %s '
@@ -1007,7 +1007,7 @@ BEGIN
 			USING ERRCODE = 'invalid_parameter_value';
 	END IF;
 
-	-- The optional space key (PLAN.md 1.4): each time partition is hash-partitioned on it,
+	-- The optional space key: each time partition is hash-partitioned on it,
 	-- which spreads one interval's writes and indexes over several tables.
 	IF (space_column IS NULL) <> (space_partitions IS NULL) THEN
 		RAISE EXCEPTION 'a space key needs both space_column and space_partitions'
@@ -1818,7 +1818,7 @@ BEGIN
 		RETURN;
 	ELSIF job_kind = 'seal' THEN
 		-- One partition per run (seal.sql). A seal waits at most five seconds for its lock
-		-- and gives up rather than queue behind a user's long transaction (D10); the next
+		-- and gives up rather than queue behind a user's long transaction; the next
 		-- run tries again.
 		PERFORM set_config('lock_timeout', '5s', true);
 		part := snouttime._next_to_seal(s);
@@ -1838,7 +1838,7 @@ BEGIN
 		detail := 'nothing to seal';
 		RETURN;
 	ELSIF job_kind = 'tier' THEN
-		-- One partition per run, like sealing, and the same lock rule (D10).
+		-- One partition per run, like sealing, and the same lock rule.
 		PERFORM set_config('lock_timeout', '5s', true);
 		part := snouttime._next_to_tier(s);
 		IF part IS NOT NULL THEN
@@ -2898,7 +2898,7 @@ BEGIN
 	--   materialized buckets before the watermark, less those with pending invalidations;
 	--   the aggregate over raw rows from the watermark on;
 	--   the aggregate over raw rows of each pending range (a late row shows up at once).
-	-- So the view is never stale, only partly materialized (D8).
+	-- So the view is never stale, only partly materialized.
 	vt := CASE WHEN r.bucket_width IS NOT NULL THEN 'int8' ELSE r.time_type::text END;
 	EXECUTE format('CREATE VIEW %I.%I AS '
 		'WITH w AS MATERIALIZED (SELECT snouttime._watermark(%L, NULL::%s) AS v), '

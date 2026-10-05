@@ -421,7 +421,7 @@ BEGIN
 	--   materialized buckets before the watermark, less those with pending invalidations;
 	--   the aggregate over raw rows from the watermark on;
 	--   the aggregate over raw rows of each pending range (a late row shows up at once).
-	-- So the view is never stale, only partly materialized (D8).
+	-- So the view is never stale, only partly materialized.
 	vt := CASE WHEN r.bucket_width IS NOT NULL THEN 'int8' ELSE r.time_type::text END;
 	EXECUTE format('CREATE VIEW %I.%I AS '
 		'WITH w AS MATERIALIZED (SELECT snouttime._watermark(%L, NULL::%s) AS v), '

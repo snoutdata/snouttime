@@ -7,15 +7,20 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/asof.rs:404
+-- src/fill.rs:272
 
-CREATE FUNCTION snouttime.asof_join(
-	left_query text, right_query text, keys text[], left_time text,
-	right_time text DEFAULT NULL, within interval DEFAULT NULL, direction text DEFAULT 'backward'
-) RETURNS SETOF record
-	LANGUAGE c VOLATILE AS 'MODULE_PATHNAME', 'snouttime_asof_join';
-COMMENT ON FUNCTION snouttime.asof_join(text, text, text[], text, text, interval, text) IS
-	'For each left row, the right row with equal keys and the latest time at or before its own (or the earliest at or after, with direction => ''forward''); see the README';
+CREATE FUNCTION snouttime.locf(value anyelement) RETURNS anyelement
+	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_locf';
+COMMENT ON FUNCTION snouttime.locf(anyelement) IS
+	'The value, or the last non-NULL value before it in the window''s order';
+CREATE FUNCTION snouttime.interpolate(value double precision) RETURNS double precision
+	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_interpolate';
+COMMENT ON FUNCTION snouttime.interpolate(double precision) IS
+	'The value, or the straight line between its non-NULL neighbours, by row position';
+CREATE FUNCTION snouttime.interpolate(value double precision, at timestamptz) RETURNS double precision
+	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_interpolate_at';
+COMMENT ON FUNCTION snouttime.interpolate(double precision, timestamptz) IS
+	'The value, or the straight line between its non-NULL neighbours, by the time of each row';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -51,7 +56,95 @@ CREATE AGGREGATE snouttime.counter_rate(value double precision, at timestamptz) 
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/catalog.rs:43
+-- src/point.rs:241
+
+CREATE FUNCTION snouttime._point_serialize(internal) RETURNS bytea
+	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_serialize';
+CREATE FUNCTION snouttime._point_deserialize(bytea, internal) RETURNS internal
+	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_deserialize';
+CREATE FUNCTION snouttime._first_combine(internal, internal) RETURNS internal
+	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_first_combine';
+CREATE FUNCTION snouttime._last_combine(internal, internal) RETURNS internal
+	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_last_combine';
+
+DO $$
+DECLARE
+	t text;
+BEGIN
+	-- One aggregate per type of `at`; the C functions read that type from the call.
+	FOREACH t IN ARRAY ARRAY['timestamptz', 'timestamp', 'date', 'bigint', 'integer'] LOOP
+		EXECUTE format($f$
+			CREATE FUNCTION snouttime._first_trans(internal, anyelement, %1$s) RETURNS internal
+				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_first_trans';
+			CREATE FUNCTION snouttime._last_trans(internal, anyelement, %1$s) RETURNS internal
+				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_last_trans';
+			CREATE FUNCTION snouttime._point_final(internal, anyelement, %1$s) RETURNS anyelement
+				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_final';
+			CREATE AGGREGATE snouttime.first(value anyelement, at %1$s) (
+				SFUNC = snouttime._first_trans, STYPE = internal,
+				FINALFUNC = snouttime._point_final, FINALFUNC_EXTRA,
+				COMBINEFUNC = snouttime._first_combine,
+				SERIALFUNC = snouttime._point_serialize, DESERIALFUNC = snouttime._point_deserialize,
+				PARALLEL = SAFE);
+			CREATE AGGREGATE snouttime.last(value anyelement, at %1$s) (
+				SFUNC = snouttime._last_trans, STYPE = internal,
+				FINALFUNC = snouttime._point_final, FINALFUNC_EXTRA,
+				COMBINEFUNC = snouttime._last_combine,
+				SERIALFUNC = snouttime._point_serialize, DESERIALFUNC = snouttime._point_deserialize,
+				PARALLEL = SAFE);
+		$f$, t);
+	END LOOP;
+END
+$$;
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/point.rs:422
+
+CREATE FUNCTION snouttime._histogram_trans(internal, double precision, double precision, double precision, integer)
+	RETURNS internal LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_trans';
+CREATE FUNCTION snouttime._histogram_combine(internal, internal) RETURNS internal
+	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_combine';
+CREATE FUNCTION snouttime._histogram_serialize(internal) RETURNS bytea
+	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_serialize';
+CREATE FUNCTION snouttime._histogram_deserialize(bytea, internal) RETURNS internal
+	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_deserialize';
+CREATE FUNCTION snouttime._histogram_final(internal, double precision, double precision, double precision, integer)
+	RETURNS bigint[] LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_final';
+CREATE AGGREGATE snouttime.histogram(value double precision, min double precision, max double precision, buckets integer) (
+	SFUNC = snouttime._histogram_trans, STYPE = internal,
+	FINALFUNC = snouttime._histogram_final, FINALFUNC_EXTRA,
+	COMBINEFUNC = snouttime._histogram_combine,
+	SERIALFUNC = snouttime._histogram_serialize, DESERIALFUNC = snouttime._histogram_deserialize,
+	PARALLEL = SAFE);
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/asof.rs:696
+
+CREATE FUNCTION snouttime.window_join(
+	left_query text, right_query text, keys text[], left_time text, value text,
+	before interval, after interval DEFAULT '0', aggregate text DEFAULT 'avg', right_time text DEFAULT NULL
+) RETURNS SETOF record
+	LANGUAGE c VOLATILE AS 'MODULE_PATHNAME', 'snouttime_window_join';
+COMMENT ON FUNCTION snouttime.window_join(text, text, text[], text, text, interval, interval, text, text) IS
+	'For each left row, an aggregate of the right rows with equal keys whose time is within [time - before, time + after]; see the README';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/asof.rs:404
+
+CREATE FUNCTION snouttime.asof_join(
+	left_query text, right_query text, keys text[], left_time text,
+	right_time text DEFAULT NULL, within interval DEFAULT NULL, direction text DEFAULT 'backward'
+) RETURNS SETOF record
+	LANGUAGE c VOLATILE AS 'MODULE_PATHNAME', 'snouttime_asof_join';
+COMMENT ON FUNCTION snouttime.asof_join(text, text, text[], text, text, interval, text) IS
+	'For each left row, the right row with equal keys and the latest time at or before its own (or the earliest at or after, with direction => ''forward''); see the README';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/catalog.rs:58
 
 CREATE TABLE snouttime.series (
 	relid regclass PRIMARY KEY,
@@ -180,29 +273,44 @@ DECLARE
 	row_ record;
 	rels regclass[];
 	rel regclass;
+	pass int;
 BEGIN
-	IF TG_OP = 'DELETE' THEN row_ := OLD; ELSE row_ := NEW; END IF;
-	-- IF, not CASE: a CASE naming row_.relid fails on a table without that column even in
-	-- a branch that is never taken.
-	IF TG_TABLE_NAME IN ('series', 'seal_sizes') THEN
-		rels := ARRAY[row_.relid];
-	ELSIF TG_TABLE_NAME = 'rollups' THEN
-		rels := ARRAY[row_.relid, row_.source];
-	ELSIF TG_TABLE_NAME = 'invalidations' THEN
-		rels := ARRAY[row_.rollup];
-	ELSE
-		rels := ARRAY[row_.target];
-	END IF;
-	FOREACH rel IN ARRAY rels LOOP
-		-- A NULL answer means the table no longer exists. Removing a row about a table that
-		-- is gone harms nobody (it is how cleanup after a DROP works); writing one is refused.
-		IF TG_OP = 'DELETE' AND snouttime._may_manage(rel) IS NULL THEN
-			CONTINUE;
+	-- Pass 1 is the row as it was (UPDATE, DELETE), pass 2 the row as it will be (INSERT,
+	-- UPDATE). An UPDATE is checked both ways: checking only the new row let a role re-point a
+	-- row about somebody else's table at a table of its own, which removed that registration
+	-- (found 2026-10-04).
+	FOR pass IN 1..2 LOOP
+		IF pass = 1 THEN
+			CONTINUE WHEN TG_OP = 'INSERT';
+			row_ := OLD;
+		ELSE
+			EXIT WHEN TG_OP = 'DELETE';
+			row_ := NEW;
 		END IF;
-		IF NOT coalesce(snouttime._may_manage(rel), false) THEN
-			RAISE EXCEPTION 'permission denied: only the owner of % may change its SnoutTime settings', rel
-				USING ERRCODE = 'insufficient_privilege';
+		-- IF, not CASE: a CASE naming row_.relid fails on a table without that column even in
+		-- a branch that is never taken.
+		IF TG_TABLE_NAME IN ('series', 'seal_sizes') THEN
+			rels := ARRAY[row_.relid];
+		ELSIF TG_TABLE_NAME = 'rollups' THEN
+			-- the materialized table too: refresh_rollup and drop_rollup write and drop it
+			rels := ARRAY[row_.relid, row_.source, row_.materialized];
+		ELSIF TG_TABLE_NAME = 'invalidations' THEN
+			rels := ARRAY[row_.rollup];
+		ELSE
+			rels := ARRAY[row_.target];
 		END IF;
+		FOREACH rel IN ARRAY rels LOOP
+			-- A NULL answer means the table no longer exists. Removing or changing a row about a
+			-- table that is gone harms nobody (it is how cleanup after a DROP works); a row that
+			-- names one is never written.
+			IF pass = 1 AND snouttime._may_manage(rel) IS NULL THEN
+				CONTINUE;
+			END IF;
+			IF NOT coalesce(snouttime._may_manage(rel), false) THEN
+				RAISE EXCEPTION 'permission denied: only the owner of % may change its SnoutTime settings', rel
+					USING ERRCODE = 'insufficient_privilege';
+			END IF;
+		END LOOP;
 	END LOOP;
 	IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
 	RETURN NEW;
@@ -232,46 +340,238 @@ GRANT INSERT, UPDATE, DELETE ON snouttime.series, snouttime.rollups, snouttime.i
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/point.rs:241
+-- src/columnar/mod.rs:307
+-- requires:
+--   catalog
 
-CREATE FUNCTION snouttime._point_serialize(internal) RETURNS bytea
-	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_serialize';
-CREATE FUNCTION snouttime._point_deserialize(bytea, internal) RETURNS internal
-	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_deserialize';
-CREATE FUNCTION snouttime._first_combine(internal, internal) RETURNS internal
-	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_first_combine';
-CREATE FUNCTION snouttime._last_combine(internal, internal) RETURNS internal
-	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_last_combine';
 
-DO $$
+-- The side tables of sealed partitions: a delta store and a
+-- delete log per partition, named after its OID. Each is made a MEMBER of the extension when
+-- it is created, which is what keeps pg_dump from dumping it: a partition's rows are dumped
+-- once, through the partition (a schema belonging to the extension is not enough; the tables
+-- in it were dumped, found by tests/dump/roundtrip.sh on 2026-09-23).
+CREATE SCHEMA snouttime_internal;
+
+CREATE FUNCTION snouttime._columnar_handler(internal) RETURNS table_am_handler
+	LANGUAGE c AS 'MODULE_PATHNAME', 'snouttime_columnar_handler';
+CREATE ACCESS METHOD snouttime_columnar TYPE TABLE HANDLER snouttime._columnar_handler;
+COMMENT ON ACCESS METHOD snouttime_columnar IS
+	'SnoutTime sealed partitions: compressed column store, with late rows in a delta store';
+CREATE FUNCTION snouttime._tiered_handler(internal) RETURNS table_am_handler
+	LANGUAGE c AS 'MODULE_PATHNAME', 'snouttime_tiered_handler';
+CREATE ACCESS METHOD snouttime_tiered TYPE TABLE HANDLER snouttime._tiered_handler;
+COMMENT ON ACCESS METHOD snouttime_tiered IS
+	'SnoutTime tiered partitions: a column store whose row groups are an object in S3';
+
+-- Keeps a column-store table's side tables in step with it: made when a table becomes
+-- columnar, given the table's columns (dropped ones included, so attribute numbers match),
+-- extended when a column is added, and dropped when the table stops being columnar.
+--
+-- SECURITY DEFINER because the side tables live in the extension's own schema, where a
+-- table's owner has no CREATE privilege, and they belong to the extension's owner. It cannot
+-- tell who called it (inside a definer, current_user is the definer), and it need not: all it
+-- does is make a table's side tables match its access method and columns, which is the same
+-- whoever asks. The side tables hold no data a caller could not read through the table.
+--
+-- And because it runs as the extension's owner, it never evaluates anything the table's owner
+-- wrote (2026-10-04). It used to give an added column the table's DEFAULT expression, which an
+-- ALTER TABLE then evaluated here, so a default calling a function of the owner's ran it as the
+-- superuser. The rows already in the delta store now get the column's missing value copied from
+-- the table, where Postgres stored it when the owner's own ALTER TABLE evaluated the default as
+-- the owner; and a type change that would have to cast rows in the delta store with a cast of
+-- someone else's is refused rather than run (it cannot arise: a change that casts rows rewrites
+-- the table, and a rewrite empties its side tables first).
+-- Takes side tables out of the extension and drops them. A member of an extension cannot be
+-- dropped on its own. Only called by the two SECURITY DEFINER functions here.
+CREATE FUNCTION snouttime._columnar_forget(delta text, deletes text) RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
 DECLARE
 	t text;
 BEGIN
-	-- One aggregate per type of `at`; the C functions read that type from the call.
-	FOREACH t IN ARRAY ARRAY['timestamptz', 'timestamp', 'date', 'bigint', 'integer'] LOOP
-		EXECUTE format($f$
-			CREATE FUNCTION snouttime._first_trans(internal, anyelement, %1$s) RETURNS internal
-				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_first_trans';
-			CREATE FUNCTION snouttime._last_trans(internal, anyelement, %1$s) RETURNS internal
-				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_last_trans';
-			CREATE FUNCTION snouttime._point_final(internal, anyelement, %1$s) RETURNS anyelement
-				LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_point_final';
-			CREATE AGGREGATE snouttime.first(value anyelement, at %1$s) (
-				SFUNC = snouttime._first_trans, STYPE = internal,
-				FINALFUNC = snouttime._point_final, FINALFUNC_EXTRA,
-				COMBINEFUNC = snouttime._first_combine,
-				SERIALFUNC = snouttime._point_serialize, DESERIALFUNC = snouttime._point_deserialize,
-				PARALLEL = SAFE);
-			CREATE AGGREGATE snouttime.last(value anyelement, at %1$s) (
-				SFUNC = snouttime._last_trans, STYPE = internal,
-				FINALFUNC = snouttime._point_final, FINALFUNC_EXTRA,
-				COMBINEFUNC = snouttime._last_combine,
-				SERIALFUNC = snouttime._point_serialize, DESERIALFUNC = snouttime._point_deserialize,
-				PARALLEL = SAFE);
-		$f$, t);
+	FOREACH t IN ARRAY ARRAY[delta, deletes] LOOP
+		CONTINUE WHEN to_regclass(format('snouttime_internal.%I', t)) IS NULL;
+		IF EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+			WHERE d.classid = 'pg_class'::regclass AND d.objid = format('snouttime_internal.%I', t)::regclass
+				AND e.extname = 'snouttime' AND d.deptype = 'e') THEN
+			EXECUTE format('ALTER EXTENSION snouttime DROP TABLE snouttime_internal.%I', t);
+		END IF;
+		EXECUTE format('DROP TABLE snouttime_internal.%I', t);
 	END LOOP;
 END
 $$;
+REVOKE EXECUTE ON FUNCTION snouttime._columnar_forget(text, text) FROM PUBLIC;
+
+-- The type a domain is ultimately over (a type that is not a domain is its own).
+CREATE FUNCTION snouttime._base_type(typ oid) RETURNS oid
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+	WITH RECURSIVE b(t, d) AS (
+		SELECT typ, 0
+		UNION ALL
+		SELECT y.typbasetype, b.d + 1 FROM b JOIN pg_type y ON y.oid = b.t WHERE y.typtype = 'd'
+	)
+	SELECT t FROM b ORDER BY d DESC LIMIT 1
+$$;
+
+CREATE FUNCTION snouttime._columnar_sync(rel regclass) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+	columnar boolean;
+	delta text := 'delta_' || rel::oid;
+	deletes text := 'deletes_' || rel::oid;
+	have regclass;
+	a record;
+	cols text := '';
+	dropped text[] := '{}';
+	dropped_col text;
+	busy boolean;
+BEGIN
+	SELECT am.amname IN ('snouttime_columnar', 'snouttime_tiered') INTO columnar
+	FROM pg_class c LEFT JOIN pg_am am ON am.oid = c.relam WHERE c.oid = rel;
+	have := to_regclass(format('snouttime_internal.%I', delta));
+
+	IF NOT coalesce(columnar, false) THEN
+		IF have IS NOT NULL THEN
+			PERFORM snouttime._columnar_forget(delta, deletes);
+		END IF;
+		RETURN;
+	END IF;
+
+	IF have IS NULL THEN
+		FOR a IN SELECT attnum, attname, attisdropped, format_type(atttypid, atttypmod) AS typ,
+				CASE WHEN attcollation <> 0 THEN (SELECT format(' COLLATE %I.%I', n.nspname, co.collname)
+					FROM pg_collation co JOIN pg_namespace n ON n.oid = co.collnamespace WHERE co.oid = attcollation) END AS coll
+			FROM pg_attribute WHERE attrelid = rel AND attnum > 0 ORDER BY attnum
+		LOOP
+			IF a.attisdropped THEN
+				cols := cols || format(', %I int', '_dropped_' || a.attnum);
+				dropped := dropped || ('_dropped_' || a.attnum);
+			ELSE
+				cols := cols || format(', %I %s%s', a.attname, a.typ, coalesce(a.coll, ''));
+			END IF;
+		END LOOP;
+		-- USING heap, always: pg_restore sets default_table_access_method to this very access
+		-- method before it creates a sealed table, and a delta store that was itself a column
+		-- store took the server down (tests/dump/roundtrip.sh, 2026-09-23).
+		EXECUTE format('CREATE TABLE snouttime_internal.%I (%s) USING heap', delta, substr(cols, 3));
+		FOREACH dropped_col IN ARRAY dropped LOOP
+			EXECUTE format('ALTER TABLE snouttime_internal.%I DROP COLUMN %I', delta, dropped_col);
+		END LOOP;
+		EXECUTE format('CREATE TABLE snouttime_internal.%I (row_number int8 NOT NULL, '
+			'locked_only boolean NOT NULL DEFAULT false, moved boolean NOT NULL DEFAULT false) USING heap', deletes);
+		EXECUTE format('CREATE INDEX ON snouttime_internal.%I (row_number)', deletes);
+		EXECUTE format('ALTER EXTENSION snouttime ADD TABLE snouttime_internal.%I', delta);
+		EXECUTE format('ALTER EXTENSION snouttime ADD TABLE snouttime_internal.%I', deletes);
+		RETURN;
+	END IF;
+
+	-- In step: every attribute number of the table has one in the delta store.
+	FOR a IN SELECT t.attnum, t.attname, t.attisdropped, format_type(t.atttypid, t.atttypmod) AS typ,
+			dd.attname AS dname, dd.attisdropped AS ddropped, format_type(dd.atttypid, dd.atttypmod) AS dtyp,
+			t.atttypid AS typid, dd.atttypid AS dtypid
+		FROM pg_attribute t
+		LEFT JOIN pg_attribute dd ON dd.attrelid = have AND dd.attnum = t.attnum
+		WHERE t.attrelid = rel AND t.attnum > 0 ORDER BY t.attnum
+	LOOP
+		IF a.dname IS NULL THEN
+			IF a.attisdropped THEN
+				EXECUTE format('ALTER TABLE %s ADD COLUMN %I int', have, '_dropped_' || a.attnum);
+				EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, '_dropped_' || a.attnum);
+			ELSE
+				EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s', have, a.attname, a.typ);
+				-- the default, as a value, never as the owner's expression (see above)
+				UPDATE pg_attribute d SET atthasmissing = true, attmissingval = p.attmissingval
+				FROM pg_attribute p
+				WHERE p.attrelid = rel AND p.attnum = a.attnum AND p.atthasmissing
+					AND d.attrelid = have AND d.attnum = a.attnum;
+			END IF;
+		ELSIF a.attisdropped AND NOT a.ddropped THEN
+			EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, a.dname);
+		ELSIF NOT a.attisdropped AND a.typ <> a.dtyp THEN
+			-- Rows already in the delta store are converted only when that runs none of the
+			-- owner's code: a new typmod, a domain to its base type, a binary-coercible cast.
+			IF NOT (a.typid = a.dtypid OR a.typid = snouttime._base_type(a.dtypid)
+				OR EXISTS (SELECT 1 FROM pg_cast c WHERE c.castsource = a.dtypid
+					AND c.casttarget = a.typid AND c.castmethod = 'b')) THEN
+				EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', have) INTO busy;
+				IF busy THEN
+					RAISE EXCEPTION 'the delta store of % holds rows that changing % to % would have to cast', rel, a.attname, a.typ
+						USING ERRCODE = 'object_not_in_prerequisite_state',
+						HINT = 'Reseal the table first (snouttime.reseal()), then change the column.';
+				END IF;
+			END IF;
+			EXECUTE format('ALTER TABLE %s ALTER COLUMN %I TYPE %s', have, a.dname, a.typ);
+		END IF;
+	END LOOP;
+END
+$$;
+
+CREATE FUNCTION snouttime._columnar_ddl() RETURNS event_trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+	r record;
+BEGIN
+	FOR r IN SELECT DISTINCT objid FROM pg_event_trigger_ddl_commands()
+		WHERE object_type = 'table' AND classid = 'pg_class'::regclass
+	LOOP
+		IF EXISTS (SELECT 1 FROM pg_class WHERE oid = r.objid AND relkind = 'r')
+			AND r.objid NOT IN (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'snouttime_internal') THEN
+			PERFORM snouttime._columnar_sync(r.objid::regclass);
+		END IF;
+	END LOOP;
+END
+$$;
+CREATE EVENT TRIGGER snouttime_columnar_ddl ON ddl_command_end
+	WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO', 'ALTER TABLE')
+	EXECUTE FUNCTION snouttime._columnar_ddl();
+
+-- Drops the side tables of a table that no longer exists. SECURITY DEFINER for the same
+-- reason as _columnar_sync; safe for anyone to call, since it refuses a table that exists.
+CREATE FUNCTION snouttime._columnar_drop_side(relid oid) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_class WHERE oid = relid) THEN
+		RAISE EXCEPTION 'table % still exists', relid::regclass;
+	END IF;
+	PERFORM snouttime._columnar_forget('delta_' || relid, 'deletes_' || relid);
+END
+$$;
+
+CREATE FUNCTION snouttime._columnar_drop() RETURNS event_trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+	r record;
+BEGIN
+	-- The catalog, not to_regclass: to_regclass needs USAGE on snouttime_internal, which a
+	-- database's owner does not have on SnoutData Cloud, so every DROP TABLE in a database with
+	-- SnoutTime failed with "permission denied for schema snouttime_internal" (0.1.5, found
+	-- 2026-09-26; the suite ran as a superuser and never saw it).
+	FOR r IN SELECT d.objid FROM pg_event_trigger_dropped_objects() d
+		WHERE d.object_type = 'table' AND d.schema_name <> 'snouttime_internal'
+			AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'snouttime_internal'
+					AND c.relname IN ('delta_' || d.objid, 'deletes_' || d.objid))
+	LOOP
+		PERFORM snouttime._columnar_drop_side(r.objid);
+	END LOOP;
+END
+$$;
+CREATE EVENT TRIGGER snouttime_columnar_drop ON sql_drop
+	EXECUTE FUNCTION snouttime._columnar_drop();
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -1285,7 +1585,7 @@ CREATE EVENT TRIGGER snouttime_on_drop ON sql_drop EXECUTE FUNCTION snouttime._o
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/jobs.rs:5
+-- src/jobs.rs:9
 -- requires:
 --   catalog
 --   series
@@ -1299,10 +1599,12 @@ CREATE EVENT TRIGGER snouttime_on_drop ON sql_drop EXECUTE FUNCTION snouttime._o
 -- worker running is a database whose jobs are simply not running rather than one that
 -- behaves differently.
 --
--- A job runs as the OWNER of the table it acts on (`SET LOCAL ROLE`), never as the
--- superuser the worker happens to be. So a job can do exactly what its owner could do by
--- hand, and a row in `jobs` naming someone else's table cannot exist in the first place
--- (the catalog's guard trigger).
+-- A job runs as the OWNER of the table it acts on, never as the superuser the worker happens
+-- to be, and inside a security-restricted operation (`snouttime._run_job`, jobs.rs), so code
+-- the owner wrote that runs during the job (a trigger, an index expression, a rollup's query)
+-- cannot step back out to the superuser with RESET ROLE. So a job can do exactly what its
+-- owner could do by hand, and a row in `jobs` naming someone else's table cannot exist in the
+-- first place (the catalog's guard trigger).
 
 
 -- Reconstruct a partition's range from the name SnoutTime gave it. Partitions made by
@@ -1659,13 +1961,17 @@ $$;
 --
 -- The row is taken with FOR UPDATE SKIP LOCKED, so several workers (or a worker and a
 -- person) can call this at once without doing the same job twice.
+--
+-- A caller only ever takes a job on a table it may manage (the guard trigger's test), so a
+-- role that is not a superuser runs its own jobs and can neither run nor fail anyone else's
+-- early. Nothing before `_run_job` runs anything but reads of the catalog: no identifier a
+-- table's owner wrote reaches a statement here.
 CREATE FUNCTION snouttime.run_due_job() RETURNS boolean
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
 	j record;
-	owner_name text;
 	started timestamptz := pg_catalog.clock_timestamp();
 	outcome record;
 	detail text;
@@ -1673,6 +1979,7 @@ DECLARE
 BEGIN
 	SELECT * INTO j FROM snouttime.jobs
 	WHERE enabled AND next_run <= pg_catalog.now()
+		AND coalesce(snouttime._may_manage(target), false)
 	ORDER BY next_run
 	FOR UPDATE SKIP LOCKED
 	LIMIT 1;
@@ -1680,23 +1987,16 @@ BEGIN
 		RETURN false;
 	END IF;
 
-	SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO owner_name
-	FROM pg_catalog.pg_class c WHERE c.oid = j.target;
-
 	BEGIN
-		IF owner_name IS NOT NULL THEN
-			EXECUTE pg_catalog.format('SET LOCAL ROLE %I', owner_name);
-		END IF;
-		SELECT * INTO outcome FROM snouttime._do_job(j.kind, j.target);
+		SELECT * INTO outcome FROM snouttime._run_job(j.kind, j.target);
 		detail := outcome.detail;
 		again := outcome.again;
-		RESET ROLE;
 		INSERT INTO snouttime.job_runs (kind, target, started_at, finished_at, ok, detail)
 		VALUES (j.kind, j.target, started, pg_catalog.clock_timestamp(), true, detail);
 	EXCEPTION WHEN OTHERS THEN
 		-- A job that fails is recorded and rescheduled; it must not stop the others, and
-		-- the transaction has to survive to write the log line.
-		RESET ROLE;
+		-- the transaction has to survive to write the log line. Leaving this block rolls
+		-- back everything the job did and puts the caller's identity back.
 		INSERT INTO snouttime.job_runs (kind, target, started_at, finished_at, ok, detail)
 		VALUES (j.kind, j.target, started, pg_catalog.clock_timestamp(), false, SQLERRM);
 	END;
@@ -1710,248 +2010,14 @@ BEGIN
 END
 $$;
 
--- The worker (and anyone else) may run jobs; who may CHANGE them is the guard trigger's
--- business, and what a job may do is its table owner's privileges.
+-- The worker (and anyone else) may run jobs, each only those on tables it may manage; who
+-- may CHANGE them is the guard trigger's business, and what a job may do is its table
+-- owner's privileges.
 GRANT EXECUTE ON FUNCTION snouttime.run_due_job() TO PUBLIC;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/columnar/mod.rs:307
--- requires:
---   catalog
-
-
--- The side tables of sealed partitions: a delta store and a
--- delete log per partition, named after its OID. Each is made a MEMBER of the extension when
--- it is created, which is what keeps pg_dump from dumping it: a partition's rows are dumped
--- once, through the partition (a schema belonging to the extension is not enough; the tables
--- in it were dumped, found by tests/dump/roundtrip.sh on 2026-09-23).
-CREATE SCHEMA snouttime_internal;
-
-CREATE FUNCTION snouttime._columnar_handler(internal) RETURNS table_am_handler
-	LANGUAGE c AS 'MODULE_PATHNAME', 'snouttime_columnar_handler';
-CREATE ACCESS METHOD snouttime_columnar TYPE TABLE HANDLER snouttime._columnar_handler;
-COMMENT ON ACCESS METHOD snouttime_columnar IS
-	'SnoutTime sealed partitions: compressed column store, with late rows in a delta store';
-CREATE FUNCTION snouttime._tiered_handler(internal) RETURNS table_am_handler
-	LANGUAGE c AS 'MODULE_PATHNAME', 'snouttime_tiered_handler';
-CREATE ACCESS METHOD snouttime_tiered TYPE TABLE HANDLER snouttime._tiered_handler;
-COMMENT ON ACCESS METHOD snouttime_tiered IS
-	'SnoutTime tiered partitions: a column store whose row groups are an object in S3';
-
--- Keeps a column-store table's side tables in step with it: made when a table becomes
--- columnar, given the table's columns (dropped ones included, so attribute numbers match),
--- extended when a column is added, and dropped when the table stops being columnar.
---
--- SECURITY DEFINER because the side tables live in the extension's own schema, where a
--- table's owner has no CREATE privilege, and they belong to the extension's owner. It cannot
--- tell who called it (inside a definer, current_user is the definer), and it need not: all it
--- does is make a table's side tables match its access method and columns, which is the same
--- whoever asks. The side tables hold no data a caller could not read through the table.
--- Takes side tables out of the extension and drops them. A member of an extension cannot be
--- dropped on its own. Only called by the two SECURITY DEFINER functions here.
-CREATE FUNCTION snouttime._columnar_forget(delta text, deletes text) RETURNS void
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	t text;
-BEGIN
-	FOREACH t IN ARRAY ARRAY[delta, deletes] LOOP
-		CONTINUE WHEN to_regclass(format('snouttime_internal.%I', t)) IS NULL;
-		IF EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
-			WHERE d.classid = 'pg_class'::regclass AND d.objid = format('snouttime_internal.%I', t)::regclass
-				AND e.extname = 'snouttime' AND d.deptype = 'e') THEN
-			EXECUTE format('ALTER EXTENSION snouttime DROP TABLE snouttime_internal.%I', t);
-		END IF;
-		EXECUTE format('DROP TABLE snouttime_internal.%I', t);
-	END LOOP;
-END
-$$;
-REVOKE EXECUTE ON FUNCTION snouttime._columnar_forget(text, text) FROM PUBLIC;
-
-CREATE FUNCTION snouttime._columnar_sync(rel regclass) RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	columnar boolean;
-	delta text := 'delta_' || rel::oid;
-	deletes text := 'deletes_' || rel::oid;
-	have regclass;
-	a record;
-	cols text := '';
-	dropped text[] := '{}';
-	dropped_col text;
-BEGIN
-	SELECT am.amname IN ('snouttime_columnar', 'snouttime_tiered') INTO columnar
-	FROM pg_class c LEFT JOIN pg_am am ON am.oid = c.relam WHERE c.oid = rel;
-	have := to_regclass(format('snouttime_internal.%I', delta));
-
-	IF NOT coalesce(columnar, false) THEN
-		IF have IS NOT NULL THEN
-			PERFORM snouttime._columnar_forget(delta, deletes);
-		END IF;
-		RETURN;
-	END IF;
-
-	IF have IS NULL THEN
-		FOR a IN SELECT attnum, attname, attisdropped, format_type(atttypid, atttypmod) AS typ,
-				CASE WHEN attcollation <> 0 THEN (SELECT format(' COLLATE %I.%I', n.nspname, co.collname)
-					FROM pg_collation co JOIN pg_namespace n ON n.oid = co.collnamespace WHERE co.oid = attcollation) END AS coll
-			FROM pg_attribute WHERE attrelid = rel AND attnum > 0 ORDER BY attnum
-		LOOP
-			IF a.attisdropped THEN
-				cols := cols || format(', %I int', '_dropped_' || a.attnum);
-				dropped := dropped || ('_dropped_' || a.attnum);
-			ELSE
-				cols := cols || format(', %I %s%s', a.attname, a.typ, coalesce(a.coll, ''));
-			END IF;
-		END LOOP;
-		-- USING heap, always: pg_restore sets default_table_access_method to this very access
-		-- method before it creates a sealed table, and a delta store that was itself a column
-		-- store took the server down (tests/dump/roundtrip.sh, 2026-09-23).
-		EXECUTE format('CREATE TABLE snouttime_internal.%I (%s) USING heap', delta, substr(cols, 3));
-		FOREACH dropped_col IN ARRAY dropped LOOP
-			EXECUTE format('ALTER TABLE snouttime_internal.%I DROP COLUMN %I', delta, dropped_col);
-		END LOOP;
-		EXECUTE format('CREATE TABLE snouttime_internal.%I (row_number int8 NOT NULL, '
-			'locked_only boolean NOT NULL DEFAULT false, moved boolean NOT NULL DEFAULT false) USING heap', deletes);
-		EXECUTE format('CREATE INDEX ON snouttime_internal.%I (row_number)', deletes);
-		EXECUTE format('ALTER EXTENSION snouttime ADD TABLE snouttime_internal.%I', delta);
-		EXECUTE format('ALTER EXTENSION snouttime ADD TABLE snouttime_internal.%I', deletes);
-		RETURN;
-	END IF;
-
-	-- In step: every attribute number of the table has one in the delta store.
-	FOR a IN SELECT t.attnum, t.attname, t.attisdropped, format_type(t.atttypid, t.atttypmod) AS typ,
-			dd.attname AS dname, dd.attisdropped AS ddropped, format_type(dd.atttypid, dd.atttypmod) AS dtyp,
-			pg_get_expr(ad.adbin, ad.adrelid) AS def
-		FROM pg_attribute t
-		LEFT JOIN pg_attribute dd ON dd.attrelid = have AND dd.attnum = t.attnum
-		LEFT JOIN pg_attrdef ad ON ad.adrelid = t.attrelid AND ad.adnum = t.attnum
-		WHERE t.attrelid = rel AND t.attnum > 0 ORDER BY t.attnum
-	LOOP
-		IF a.dname IS NULL THEN
-			IF a.attisdropped THEN
-				EXECUTE format('ALTER TABLE %s ADD COLUMN %I int', have, '_dropped_' || a.attnum);
-				EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, '_dropped_' || a.attnum);
-			ELSE
-				EXECUTE format('ALTER TABLE %s ADD COLUMN %I %s%s', have, a.attname, a.typ,
-					coalesce(' DEFAULT ' || a.def, ''));
-			END IF;
-		ELSIF a.attisdropped AND NOT a.ddropped THEN
-			EXECUTE format('ALTER TABLE %s DROP COLUMN %I', have, a.dname);
-		ELSIF NOT a.attisdropped AND a.typ <> a.dtyp THEN
-			EXECUTE format('ALTER TABLE %s ALTER COLUMN %I TYPE %s', have, a.dname, a.typ);
-		END IF;
-	END LOOP;
-END
-$$;
-
-CREATE FUNCTION snouttime._columnar_ddl() RETURNS event_trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	r record;
-BEGIN
-	FOR r IN SELECT DISTINCT objid FROM pg_event_trigger_ddl_commands()
-		WHERE object_type = 'table' AND classid = 'pg_class'::regclass
-	LOOP
-		IF EXISTS (SELECT 1 FROM pg_class WHERE oid = r.objid AND relkind = 'r')
-			AND r.objid NOT IN (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-				WHERE n.nspname = 'snouttime_internal') THEN
-			PERFORM snouttime._columnar_sync(r.objid::regclass);
-		END IF;
-	END LOOP;
-END
-$$;
-CREATE EVENT TRIGGER snouttime_columnar_ddl ON ddl_command_end
-	WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO', 'ALTER TABLE')
-	EXECUTE FUNCTION snouttime._columnar_ddl();
-
--- Drops the side tables of a table that no longer exists. SECURITY DEFINER for the same
--- reason as _columnar_sync; safe for anyone to call, since it refuses a table that exists.
-CREATE FUNCTION snouttime._columnar_drop_side(relid oid) RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $$
-BEGIN
-	IF EXISTS (SELECT 1 FROM pg_class WHERE oid = relid) THEN
-		RAISE EXCEPTION 'table % still exists', relid::regclass;
-	END IF;
-	PERFORM snouttime._columnar_forget('delta_' || relid, 'deletes_' || relid);
-END
-$$;
-
-CREATE FUNCTION snouttime._columnar_drop() RETURNS event_trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	r record;
-BEGIN
-	-- The catalog, not to_regclass: to_regclass needs USAGE on snouttime_internal, which a
-	-- database's owner does not have on SnoutData Cloud, so every DROP TABLE in a database with
-	-- SnoutTime failed with "permission denied for schema snouttime_internal" (0.1.5, found
-	-- 2026-09-26; the suite ran as a superuser and never saw it).
-	FOR r IN SELECT d.objid FROM pg_event_trigger_dropped_objects() d
-		WHERE d.object_type = 'table' AND d.schema_name <> 'snouttime_internal'
-			AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-				WHERE n.nspname = 'snouttime_internal'
-					AND c.relname IN ('delta_' || d.objid, 'deletes_' || d.objid))
-	LOOP
-		PERFORM snouttime._columnar_drop_side(r.objid);
-	END LOOP;
-END
-$$;
-CREATE EVENT TRIGGER snouttime_columnar_drop ON sql_drop
-	EXECUTE FUNCTION snouttime._columnar_drop();
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/fill.rs:272
-
-CREATE FUNCTION snouttime.locf(value anyelement) RETURNS anyelement
-	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_locf';
-COMMENT ON FUNCTION snouttime.locf(anyelement) IS
-	'The value, or the last non-NULL value before it in the window''s order';
-CREATE FUNCTION snouttime.interpolate(value double precision) RETURNS double precision
-	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_interpolate';
-COMMENT ON FUNCTION snouttime.interpolate(double precision) IS
-	'The value, or the straight line between its non-NULL neighbours, by row position';
-CREATE FUNCTION snouttime.interpolate(value double precision, at timestamptz) RETURNS double precision
-	LANGUAGE c WINDOW IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_interpolate_at';
-COMMENT ON FUNCTION snouttime.interpolate(double precision, timestamptz) IS
-	'The value, or the straight line between its non-NULL neighbours, by the time of each row';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/point.rs:422
-
-CREATE FUNCTION snouttime._histogram_trans(internal, double precision, double precision, double precision, integer)
-	RETURNS internal LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_trans';
-CREATE FUNCTION snouttime._histogram_combine(internal, internal) RETURNS internal
-	LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_combine';
-CREATE FUNCTION snouttime._histogram_serialize(internal) RETURNS bytea
-	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_serialize';
-CREATE FUNCTION snouttime._histogram_deserialize(bytea, internal) RETURNS internal
-	LANGUAGE c STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_deserialize';
-CREATE FUNCTION snouttime._histogram_final(internal, double precision, double precision, double precision, integer)
-	RETURNS bigint[] LANGUAGE c IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'snouttime_histogram_final';
-CREATE AGGREGATE snouttime.histogram(value double precision, min double precision, max double precision, buckets integer) (
-	SFUNC = snouttime._histogram_trans, STYPE = internal,
-	FINALFUNC = snouttime._histogram_final, FINALFUNC_EXTRA,
-	COMBINEFUNC = snouttime._histogram_combine,
-	SERIALFUNC = snouttime._histogram_serialize, DESERIALFUNC = snouttime._histogram_deserialize,
-	PARALLEL = SAFE);
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/jobs.rs:7
+-- src/jobs.rs:11
 -- requires:
 --   catalog
 --   series
@@ -2267,27 +2333,8 @@ BEGIN
 END
 $$;
 
--- How much of a sealed table has changed since its seal: rows in its delta store plus rows
--- in its delete log, counted up to `upto` (so asking costs at most `upto` rows of reading).
-CREATE FUNCTION snouttime._changed_since_seal(leaf regclass, upto int8) RETURNS int8
-LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-	n int8 := 0;
-	m int8;
-	side regclass;
-BEGIN
-	FOREACH side IN ARRAY ARRAY[to_regclass('snouttime_internal.delta_' || leaf::oid),
-		to_regclass('snouttime_internal.deletes_' || leaf::oid)]
-	LOOP
-		CONTINUE WHEN side IS NULL;
-		EXECUTE format('SELECT count(*) FROM (SELECT 1 FROM %s LIMIT %s) x', side, upto) INTO m;
-		n := n + m;
-	END LOOP;
-	RETURN n;
-END
-$$;
+-- snouttime._changed_since_seal(leaf, upto), which the reseal check below asks, is in
+-- src/columnar/read.rs: it reads the side tables, which SQL run as a table's owner cannot.
 
 
 CREATE FUNCTION snouttime.set_sealing(relation regclass, after interval,
@@ -2426,7 +2473,127 @@ $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/jobs.rs:8
+-- src/info.rs:5
+-- requires:
+--   catalog
+--   series
+--   jobs
+--   seal
+
+-- What is there, and what it costs.
+--
+-- Both views read the catalogs and the planner's own statistics only. Nothing here scans a
+-- table, so asking what a series table looks like is cheap however much data it holds, and
+-- the row counts are Postgres's estimates (`reltuples`, as of the last ANALYZE), never a
+-- count(*). A view that took a minute on a big table would not get looked at.
+
+-- One row per partition, including the default one and any partition somebody else made.
+CREATE VIEW snouttime.partition_info AS
+SELECT
+	s.relid AS series,
+	c.oid AS partition,
+	c.relname AS name,
+	CASE
+		WHEN c.oid = snouttime._default_partition(s.relid) THEN 'default'
+		WHEN b.lo IS NULL THEN 'foreign'   -- a partition SnoutTime did not make and will not touch
+		-- rewritten into the column store; with a space key, every leaf is
+		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_tiered(t.relid))
+			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
+				WHERE l.relkind = 'r' AND NOT snouttime._is_tiered(t.relid)) THEN 'tiered'
+		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_sealed(t.relid))
+			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
+				WHERE l.relkind = 'r' AND NOT snouttime._is_sealed(t.relid)) THEN 'sealed'
+		WHEN c.relkind = 'p' THEN 'spread' -- hash-partitioned by the space key
+		ELSE 'live'
+	END AS state,
+	b.lo AS range_start,
+	b.hi AS range_end,
+	-- Summed over the whole tree under this partition: with a space key a partition is
+	-- itself partitioned, and a partitioned table has no storage and no rows of its own.
+	(SELECT coalesce(sum(greatest(leaf.reltuples, 0)), 0)::int8
+	 FROM pg_partition_tree(c.oid) AS t
+	 JOIN pg_class leaf ON leaf.oid = t.relid AND leaf.relkind <> 'p') AS estimated_rows,
+	(SELECT coalesce(sum(pg_total_relation_size(t.relid)), 0)
+	 FROM pg_partition_tree(c.oid) AS t) AS bytes,
+	(SELECT count(*) FROM pg_inherits h WHERE h.inhparent = c.oid)::int AS children,
+	-- what its leaves took as heap just before they were sealed; NULL for a partition never
+	-- sealed. With `bytes` it is the compression a seal bought.
+	(SELECT sum(z.bytes_before)
+	 FROM pg_partition_tree(c.oid) AS t
+	 JOIN snouttime.seal_sizes z ON z.relid = t.relid)::int8 AS bytes_before
+FROM snouttime.series s
+JOIN pg_inherits i ON i.inhparent = s.relid
+JOIN pg_class c ON c.oid = i.inhrelid
+LEFT JOIN LATERAL snouttime._bounds_of(s, c.oid) AS b ON true;
+
+COMMENT ON VIEW snouttime.partition_info IS
+	'One row per partition of every series table. Estimates from the planner, no scans.';
+
+-- One row per series table.
+CREATE VIEW snouttime.series_info AS
+SELECT
+	s.relid AS series,
+	s.time_column,
+	s.time_type,
+	coalesce(s.partition_interval::text, s.partition_width::text) AS partition_size,
+	s.space_column,
+	s.space_partitions,
+	coalesce(s.retention::text, s.retention_width::text) AS retention,
+	count(*) FILTER (WHERE p.state <> 'default')::int AS partitions,
+	count(*) FILTER (WHERE p.state = 'foreign')::int AS foreign_partitions,
+	-- The bounds are text (timestamps and integer keys alike), so they are ordered as what they
+	-- are: min() on text put '9000' after '10000' on an integer series.
+	(array_agg(p.range_start ORDER BY
+		CASE WHEN s.partition_width IS NOT NULL THEN p.range_start::numeric END,
+		CASE WHEN s.partition_width IS NULL THEN p.range_start::timestamptz END)
+		FILTER (WHERE p.state <> 'default' AND p.range_start IS NOT NULL))[1] AS oldest_range,
+	(array_agg(p.range_end ORDER BY
+		CASE WHEN s.partition_width IS NOT NULL THEN p.range_end::numeric END DESC,
+		CASE WHEN s.partition_width IS NULL THEN p.range_end::timestamptz END DESC)
+		FILTER (WHERE p.state <> 'default' AND p.range_end IS NOT NULL))[1] AS newest_range,
+	coalesce(sum(p.estimated_rows) FILTER (WHERE p.state = 'default'), 0) AS rows_in_default,
+	coalesce(sum(p.estimated_rows), 0) AS estimated_rows,
+	(SELECT coalesce(sum(pg_total_relation_size(t.relid)), 0)
+	 FROM pg_partition_tree(s.relid) AS t) AS bytes,
+	-- the sealed partitions (not tiered ones, whose bytes are in S3), now and as heap
+	coalesce(sum(p.bytes) FILTER (WHERE p.state = 'sealed' AND p.bytes_before IS NOT NULL), 0)::int8 AS sealed_bytes,
+	coalesce(sum(p.bytes_before) FILTER (WHERE p.state = 'sealed'), 0)::int8 AS sealed_bytes_before
+FROM snouttime.series s
+LEFT JOIN snouttime.partition_info p ON p.series = s.relid
+GROUP BY s.relid, s.time_column, s.time_type, s.partition_interval, s.partition_width,
+	s.space_column, s.space_partitions, s.retention, s.retention_width;
+
+COMMENT ON VIEW snouttime.series_info IS
+	'One row per series table: its shape, how many partitions it has, and what it costs.';
+
+-- The last thing each job did, which is the question asked when something looks stuck.
+CREATE VIEW snouttime.job_info AS
+SELECT
+	j.kind,
+	j.target,
+	j.schedule,
+	j.next_run,
+	j.enabled,
+	r.started_at AS last_run,
+	r.finished_at - r.started_at AS last_took,
+	r.ok AS last_ok,
+	r.detail AS last_detail
+FROM snouttime.jobs j
+LEFT JOIN LATERAL (
+	SELECT * FROM snouttime.job_runs runs
+	WHERE runs.kind = j.kind AND runs.target = j.target
+	ORDER BY runs.started_at DESC
+	LIMIT 1
+) AS r ON true;
+
+COMMENT ON VIEW snouttime.job_info IS
+	'Every scheduled job with what happened the last time it ran.';
+
+GRANT SELECT ON snouttime.partition_info, snouttime.series_info, snouttime.job_info TO PUBLIC;
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/jobs.rs:12
 -- requires:
 --   catalog
 --   series
@@ -2661,18 +2828,43 @@ $$;
 -- The statement-level trigger on a rollup's source: log the time range the statement touched,
 -- once per rollup built on this table. SECURITY DEFINER because the writer need not own the
 -- rollups whose invalidation log this writes to; it writes nothing but ranges of this table.
+--
+-- Because it runs as the extension's owner, it reads nothing a table's owner could choose
+-- (2026-10-04). Anyone who owns a table may attach this function to it as a trigger of their
+-- own, with arguments of their own and without transition tables, and then `new_rows` would
+-- have been looked up in pg_temp, where a temporary view of theirs could run their code as
+-- the superuser. So it acts only as one of the four triggers _install_invalidation makes,
+-- whose transition tables are new_rows and old_rows, and only on the table's real time
+-- column, of a type whose min() and max() are the server's own.
 CREATE FUNCTION snouttime._invalidate() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-	col text := TG_ARGV[0];
-	t regtype := TG_ARGV[1]::regtype;
+	col name;
+	t regtype;
+	tg record;
 	lo text;
 	hi text;
 	lo2 text;
 	hi2 text;
 BEGIN
+	SELECT g.tgname, g.tgnewtable, g.tgoldtable INTO tg
+	FROM pg_trigger g WHERE g.tgrelid = TG_RELID AND g.tgname = TG_NAME;
+	IF tg.tgname IS NULL OR TG_NAME <> 'snouttime_invalidate_' || lower(TG_OP)
+		OR (TG_OP IN ('INSERT', 'UPDATE') AND tg.tgnewtable IS DISTINCT FROM 'new_rows')
+		OR (TG_OP IN ('DELETE', 'UPDATE') AND tg.tgoldtable IS DISTINCT FROM 'old_rows') THEN
+		RAISE EXCEPTION 'snouttime._invalidate() runs only as the triggers snouttime.create_rollup() makes'
+			USING ERRCODE = 'insufficient_privilege';
+	END IF;
+	SELECT a.attname, a.atttypid::regtype INTO col, t
+	FROM pg_attribute a
+	WHERE a.attrelid = TG_RELID AND a.attname = TG_ARGV[0] AND a.attnum > 0 AND NOT a.attisdropped
+		AND a.atttypid IN ('timestamptz'::regtype, 'timestamp'::regtype, 'date'::regtype,
+			'smallint'::regtype, 'integer'::regtype, 'bigint'::regtype);
+	IF col IS NULL THEN
+		RAISE EXCEPTION 'snouttime._invalidate(): % has no time column %', TG_RELID::regclass, TG_ARGV[0];
+	END IF;
 	IF TG_OP = 'TRUNCATE' THEN
 		-- everything: refresh_rollup reads the extreme keys as "from the first bucket it has"
 		INSERT INTO snouttime.invalidations (rollup, lo, hi)
@@ -2680,10 +2872,10 @@ BEGIN
 		RETURN NULL;
 	END IF;
 	IF TG_OP IN ('INSERT', 'UPDATE') THEN
-		EXECUTE format('SELECT min(%I)::text, max(%I)::text FROM new_rows', col, col) INTO lo, hi;
+		EXECUTE format('SELECT pg_catalog.min(%I)::text, pg_catalog.max(%I)::text FROM new_rows', col, col) INTO lo, hi;
 	END IF;
 	IF TG_OP IN ('DELETE', 'UPDATE') THEN
-		EXECUTE format('SELECT min(%I)::text, max(%I)::text FROM old_rows', col, col) INTO lo2, hi2;
+		EXECUTE format('SELECT pg_catalog.min(%I)::text, pg_catalog.max(%I)::text FROM old_rows', col, col) INTO lo2, hi2;
 	END IF;
 	IF lo IS NULL AND lo2 IS NULL THEN
 		RETURN NULL;
@@ -3000,135 +3192,15 @@ $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/info.rs:5
--- requires:
---   catalog
---   series
---   jobs
---   seal
-
--- What is there, and what it costs.
---
--- Both views read the catalogs and the planner's own statistics only. Nothing here scans a
--- table, so asking what a series table looks like is cheap however much data it holds, and
--- the row counts are Postgres's estimates (`reltuples`, as of the last ANALYZE), never a
--- count(*). A view that took a minute on a big table would not get looked at.
-
--- One row per partition, including the default one and any partition somebody else made.
-CREATE VIEW snouttime.partition_info AS
-SELECT
-	s.relid AS series,
-	c.oid AS partition,
-	c.relname AS name,
-	CASE
-		WHEN c.oid = snouttime._default_partition(s.relid) THEN 'default'
-		WHEN b.lo IS NULL THEN 'foreign'   -- a partition SnoutTime did not make and will not touch
-		-- rewritten into the column store; with a space key, every leaf is
-		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_tiered(t.relid))
-			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
-				WHERE l.relkind = 'r' AND NOT snouttime._is_tiered(t.relid)) THEN 'tiered'
-		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_sealed(t.relid))
-			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
-				WHERE l.relkind = 'r' AND NOT snouttime._is_sealed(t.relid)) THEN 'sealed'
-		WHEN c.relkind = 'p' THEN 'spread' -- hash-partitioned by the space key
-		ELSE 'live'
-	END AS state,
-	b.lo AS range_start,
-	b.hi AS range_end,
-	-- Summed over the whole tree under this partition: with a space key a partition is
-	-- itself partitioned, and a partitioned table has no storage and no rows of its own.
-	(SELECT coalesce(sum(greatest(leaf.reltuples, 0)), 0)::int8
-	 FROM pg_partition_tree(c.oid) AS t
-	 JOIN pg_class leaf ON leaf.oid = t.relid AND leaf.relkind <> 'p') AS estimated_rows,
-	(SELECT coalesce(sum(pg_total_relation_size(t.relid)), 0)
-	 FROM pg_partition_tree(c.oid) AS t) AS bytes,
-	(SELECT count(*) FROM pg_inherits h WHERE h.inhparent = c.oid)::int AS children,
-	-- what its leaves took as heap just before they were sealed; NULL for a partition never
-	-- sealed. With `bytes` it is the compression a seal bought.
-	(SELECT sum(z.bytes_before)
-	 FROM pg_partition_tree(c.oid) AS t
-	 JOIN snouttime.seal_sizes z ON z.relid = t.relid)::int8 AS bytes_before
-FROM snouttime.series s
-JOIN pg_inherits i ON i.inhparent = s.relid
-JOIN pg_class c ON c.oid = i.inhrelid
-LEFT JOIN LATERAL snouttime._bounds_of(s, c.oid) AS b ON true;
-
-COMMENT ON VIEW snouttime.partition_info IS
-	'One row per partition of every series table. Estimates from the planner, no scans.';
-
--- One row per series table.
-CREATE VIEW snouttime.series_info AS
-SELECT
-	s.relid AS series,
-	s.time_column,
-	s.time_type,
-	coalesce(s.partition_interval::text, s.partition_width::text) AS partition_size,
-	s.space_column,
-	s.space_partitions,
-	coalesce(s.retention::text, s.retention_width::text) AS retention,
-	count(*) FILTER (WHERE p.state <> 'default')::int AS partitions,
-	count(*) FILTER (WHERE p.state = 'foreign')::int AS foreign_partitions,
-	-- The bounds are text (timestamps and integer keys alike), so they are ordered as what they
-	-- are: min() on text put '9000' after '10000' on an integer series.
-	(array_agg(p.range_start ORDER BY
-		CASE WHEN s.partition_width IS NOT NULL THEN p.range_start::numeric END,
-		CASE WHEN s.partition_width IS NULL THEN p.range_start::timestamptz END)
-		FILTER (WHERE p.state <> 'default' AND p.range_start IS NOT NULL))[1] AS oldest_range,
-	(array_agg(p.range_end ORDER BY
-		CASE WHEN s.partition_width IS NOT NULL THEN p.range_end::numeric END DESC,
-		CASE WHEN s.partition_width IS NULL THEN p.range_end::timestamptz END DESC)
-		FILTER (WHERE p.state <> 'default' AND p.range_end IS NOT NULL))[1] AS newest_range,
-	coalesce(sum(p.estimated_rows) FILTER (WHERE p.state = 'default'), 0) AS rows_in_default,
-	coalesce(sum(p.estimated_rows), 0) AS estimated_rows,
-	(SELECT coalesce(sum(pg_total_relation_size(t.relid)), 0)
-	 FROM pg_partition_tree(s.relid) AS t) AS bytes,
-	-- the sealed partitions (not tiered ones, whose bytes are in S3), now and as heap
-	coalesce(sum(p.bytes) FILTER (WHERE p.state = 'sealed' AND p.bytes_before IS NOT NULL), 0)::int8 AS sealed_bytes,
-	coalesce(sum(p.bytes_before) FILTER (WHERE p.state = 'sealed'), 0)::int8 AS sealed_bytes_before
-FROM snouttime.series s
-LEFT JOIN snouttime.partition_info p ON p.series = s.relid
-GROUP BY s.relid, s.time_column, s.time_type, s.partition_interval, s.partition_width,
-	s.space_column, s.space_partitions, s.retention, s.retention_width;
-
-COMMENT ON VIEW snouttime.series_info IS
-	'One row per series table: its shape, how many partitions it has, and what it costs.';
-
--- The last thing each job did, which is the question asked when something looks stuck.
-CREATE VIEW snouttime.job_info AS
-SELECT
-	j.kind,
-	j.target,
-	j.schedule,
-	j.next_run,
-	j.enabled,
-	r.started_at AS last_run,
-	r.finished_at - r.started_at AS last_took,
-	r.ok AS last_ok,
-	r.detail AS last_detail
-FROM snouttime.jobs j
-LEFT JOIN LATERAL (
-	SELECT * FROM snouttime.job_runs runs
-	WHERE runs.kind = j.kind AND runs.target = j.target
-	ORDER BY runs.started_at DESC
-	LIMIT 1
-) AS r ON true;
-
-COMMENT ON VIEW snouttime.job_info IS
-	'Every scheduled job with what happened the last time it ran.';
-
-GRANT SELECT ON snouttime.partition_info, snouttime.series_info, snouttime.job_info TO PUBLIC;
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/asof.rs:696
-
-CREATE FUNCTION snouttime.window_join(
-	left_query text, right_query text, keys text[], left_time text, value text,
-	before interval, after interval DEFAULT '0', aggregate text DEFAULT 'avg', right_time text DEFAULT NULL
-) RETURNS SETOF record
-	LANGUAGE c VOLATILE AS 'MODULE_PATHNAME', 'snouttime_window_join';
-COMMENT ON FUNCTION snouttime.window_join(text, text, text[], text, text, interval, interval, text, text) IS
-	'For each left row, an aggregate of the right rows with equal keys whose time is within [time - before, time + after]; see the README';
+-- src/columnar/read.rs:839
+-- snouttime::columnar::read::_changed_since_seal
+CREATE  FUNCTION "_changed_since_seal"(
+	"leaf" regclass, /* pgrx :: PgRelation */
+	"upto" bigint /* i64 */
+) RETURNS bigint /* i64 */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', '_changed_since_seal_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3449,6 +3521,16 @@ AS 'MODULE_PATHNAME', 'distinct_count_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/jobs.rs:43
+-- snouttime::jobs::run_job
+
+CREATE FUNCTION snouttime._run_job(job_kind text, rel regclass)
+RETURNS TABLE (detail text, again boolean)
+LANGUAGE c VOLATILE STRICT
+AS 'MODULE_PATHNAME', 'run_job_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/worker.rs:106
 -- snouttime::worker::start_worker
 CREATE  FUNCTION "start_worker"() RETURNS bool /* bool */
@@ -3528,14 +3610,15 @@ CREATE AGGREGATE snouttime.merge(sketch snouttime.tdigest) (
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/tdigest.rs:443
--- snouttime::tdigest::sketch_count
-CREATE  FUNCTION "sketch_count"(
-	"sketch" TDigest /* TDigest */
-) RETURNS double precision /* f64 */
-IMMUTABLE STRICT PARALLEL SAFE
+-- src/tdigest.rs:431
+-- snouttime::tdigest::percentile
+CREATE  FUNCTION "percentile"(
+	"sketch" TDigest, /* TDigest */
+	"q" double precision[] /* Vec < f64 > */
+) RETURNS double precision[] /* :: std :: option :: Option < Vec < f64 > > */
+IMMUTABLE STRICT PARALLEL SAFE 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'sketch_count_wrapper';
+AS 'MODULE_PATHNAME', 'percentiles_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3551,15 +3634,14 @@ AS 'MODULE_PATHNAME', 'percentile_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/tdigest.rs:431
--- snouttime::tdigest::percentile
-CREATE  FUNCTION "percentile"(
-	"sketch" TDigest, /* TDigest */
-	"q" double precision[] /* Vec < f64 > */
-) RETURNS double precision[] /* :: std :: option :: Option < Vec < f64 > > */
-IMMUTABLE STRICT PARALLEL SAFE 
+-- src/tdigest.rs:443
+-- snouttime::tdigest::sketch_count
+CREATE  FUNCTION "sketch_count"(
+	"sketch" TDigest /* TDigest */
+) RETURNS double precision /* f64 */
+IMMUTABLE STRICT PARALLEL SAFE
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'percentiles_wrapper';
+AS 'MODULE_PATHNAME', 'sketch_count_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
