@@ -1,11 +1,10 @@
-//! The as-of join (PLAN.md Phase 2.4, D12): `snouttime.asof_join(left_query, right_query, keys,
+//! The as-of join: `snouttime.asof_join(left_query, right_query, keys,
 //! left_time, right_time, within, direction)`. Semantics in README.md ("As-of join").
 //!
 //! Both queries are opened as cursors ordered by (keys, time), and the two streams are merged in
 //! one pass: O(n + m) comparisons after whatever the planner does to produce the order (an index
 //! scan, or a sort). The SQL form, `LATERAL (... ORDER BY time DESC LIMIT 1)`, is an index probe
-//! per left row; which wins depends on the sizes, and that is measured, not assumed (Phase 2's
-//! exit).
+//! per left row; which wins depends on the sizes, and that is measured, not assumed.
 //!
 //! Comparisons use each type's default btree comparison function with the column's collation,
 //! which is exactly the order `ORDER BY` produced, so the merge and the sort agree. A right row

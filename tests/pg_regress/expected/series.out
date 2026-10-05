@@ -1,4 +1,4 @@
--- Phase 1.1: create_series, migrate, drop_series, and the refusals.
+-- create_series, migrate, drop_series, and the refusals.
 SET client_min_messages = notice;
 SET timezone = 'America/New_York';   -- partitions must still be aligned in UTC
 -- ---- an empty table ----

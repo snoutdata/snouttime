@@ -1,4 +1,4 @@
--- Phase 3.6: SnoutTime's own scan of sealed tables. It must return exactly what the plain
+-- SnoutTime's own scan of sealed tables. It must return exactly what the plain
 -- scan returns, for any WHERE clause, while decoding fewer columns and skipping row groups.
 SET client_min_messages = warning;
 SET timezone = 'UTC';

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 4: a refresh racing inserts loses nothing. Eight sessions write rows at random times
+# A refresh racing inserts loses nothing. Eight sessions write rows at random times
 # in the last few hours (so into buckets a refresh has already materialized), in small
 # transactions, while another session refreshes the rollup over and over. Afterwards one more
 # refresh, and the materialized buckets must equal the aggregate of the raw rows exactly: an

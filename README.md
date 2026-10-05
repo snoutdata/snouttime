@@ -125,7 +125,7 @@ point; NULL with fewer than two points.
 ## Sketches
 
 Two approximate aggregates whose partial states merge, so a sketch per hour can become a sketch
-per day without the rows (and, in Phase 4, a rollup can keep them).
+per day without the rows (and a rollup can keep them).
 
 **Percentiles: `tdigest`.** `snouttime.percentile_sketch(value [, compression])` builds a merging
 t-digest (Dunning and Ertl, 2019); `snouttime.percentile(sketch, q)` estimates the q-quantile, and

@@ -1,4 +1,4 @@
-//! Distinct-count sketches (PLAN.md Phase 2.3, D9): HyperLogLog.
+//! Distinct-count sketches: HyperLogLog.
 //!
 //! The registers are the classic HyperLogLog of Flajolet, Fusy, Gandouet and Meunier (2007):
 //! 2^p of them, each holding the most leading zeros (plus one) seen in the hashes routed to it.
@@ -10,7 +10,7 @@
 //! Values are hashed with their type's own 64-bit extended hash function (the one hash
 //! partitioning uses), so any hashable type works and a collation is honoured. Two sketches
 //! merge by taking the larger register, which is exact: the merge of two sketches is the
-//! sketch of the union (D9).
+//! sketch of the union.
 //!
 //! SQL:
 //!

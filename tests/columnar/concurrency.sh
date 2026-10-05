@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 3.5: two sessions writing the same rows of a sealed table behave like heap rows do,
+# Two sessions writing the same rows of a sealed table behave like heap rows do,
 # or fail safely where they cannot. For a column-store row and for a delta-store row:
 #
 #   delete, delete    the second waits for the first; after its COMMIT, the second deletes

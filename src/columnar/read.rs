@@ -1,5 +1,5 @@
 //! Reading a column store: its metapage and directory, a row group's columns as Datums, and
-//! the side tables (docs/snouttime/COLUMNAR.md §1, §4, §5).
+//! the side tables.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,7 +14,7 @@ use super::types::{self, Kind};
 use crate::codec::CodecError;
 
 
-/// TIDs (COLUMNAR.md §4): column-store row `n` is `(n / 256, n % 256 + 1)`; a delta-store
+/// TIDs: column-store row `n` is `(n / 256, n % 256 + 1)`; a delta-store
 /// row is its heap TID with the top bit of the block number set.
 pub const ROWS_PER_BLOCK: u64 = 256;
 pub const DELTA_BIT: u32 = 0x8000_0000;
@@ -735,7 +735,7 @@ impl Group {
 /// tiered partition's row groups are fetched whole. No rows for a relation that is not a column
 /// store (a live partition, the delta store). Needs SELECT on the relation. A column whose
 /// chunks use more than one encoding (a dictionary where values repeat, plain bytes where they do
-/// not) has a row per encoding. PLAN.md Phase 3, claim 2: the compression per encoding per type.
+/// not) has a row per encoding, which is the compression per encoding per type.
 #[pg_extern(stable, parallel_safe)]
 fn column_sizes(
 	relation: pgrx::PgRelation,
@@ -903,7 +903,7 @@ pub unsafe fn deleted_rows(deletes: pg_sys::Oid, snapshot: pg_sys::Snapshot) -> 
 /// the delete log's index on row_number; None when the log has no such index. A scan that seeks
 /// into a few row groups asks this per group instead of reading the whole log: at 1% of a
 /// 10M-row partition deleted, the whole log is 100,000 entries read and sorted for a query that
-/// returns ten rows (bench/late.sh, 2026-09-25).
+/// returns ten rows (measured 2026-09-25).
 ///
 /// # Safety
 /// `snapshot` must be valid.

@@ -1,4 +1,4 @@
--- SnoutTime 0.1.4 -> 0.1.5 (docs/snouttime/PLAN.md Phase 6, U1).
+-- SnoutTime 0.1.4 -> 0.1.5.
 --
 -- The sql_drop event trigger asked to_regclass('snouttime_internal.delta_<oid>'), which needs
 -- USAGE on snouttime_internal. A database's owner on SnoutData Cloud is not a superuser and does

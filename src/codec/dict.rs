@@ -1,4 +1,4 @@
-//! Byte strings (D6): text, and anything else stored as bytes.
+//! Byte strings: text, and anything else stored as bytes.
 //!
 //! * [`encode`]: a dictionary of the distinct values, then each row as an index into it, the
 //!   indexes either run-length encoded (a `segment_by`-ordered column is long runs) or

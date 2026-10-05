@@ -1,4 +1,4 @@
--- SnoutTime 0.1.1 -> 0.1.2 (docs/snouttime/PLAN.md Phase 3, 3.5 and claim 2).
+-- SnoutTime 0.1.1 -> 0.1.2.
 --
 -- snouttime.column_sizes(partition): what each column of a sealed partition costs, per encoding,
 -- read from its row groups' headers. The rest of 0.1.2 is in the library and changes no catalog:

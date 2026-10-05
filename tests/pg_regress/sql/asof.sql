@@ -1,4 +1,4 @@
--- Phase 2.4: snouttime.asof_join. Semantics in README.md ("As-of join").
+-- snouttime.asof_join. Semantics in README.md ("As-of join").
 -- The property that matters is that it gives exactly what the LATERAL form gives; the right
 -- side is several cursor batches (10,000 rows each) long, so matches cross batch boundaries.
 SET client_min_messages = warning;

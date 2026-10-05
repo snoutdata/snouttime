@@ -1,4 +1,4 @@
-//! Column encodings for sealed partitions (PLAN.md Phase 3.2, D6). Pure Rust: nothing in this
+//! Column encodings for sealed partitions. Pure Rust: nothing in this
 //! module or below it touches Postgres, so it is unit-tested and fuzzed without a database.
 //!
 //! * [`int`]: integers and timestamps, as the value, its delta or its delta-of-delta (whichever
@@ -9,7 +9,7 @@
 //! * [`bitmap`]: booleans and null maps.
 //! * [`compress`]: the LZ4 or zstd frame one column block is wrapped in.
 //!
-//! R5 governs every decoder here: the bytes are untrusted (a torn page, a bad disk, a hostile
+//! The rule for every decoder here: the bytes are untrusted (a torn page, a bad disk, a hostile
 //! dump), so a decoder returns [`CodecError`] for anything it cannot make sense of. It never
 //! panics, never reads out of bounds, and never allocates more than the input justifies: a
 //! count is refused above [`MAX_VALUES`] before anything is allocated for it, and a decoder
@@ -28,7 +28,7 @@ use std::fmt;
 
 /// The most values one encoded column chunk may hold. Decoders refuse a larger count before
 /// allocating anything for it, so a corrupt count costs an error, not memory. A format limit,
-/// chosen (PLAN.md "Chosen"), not measured: a block of a sealed partition holds far fewer rows.
+/// chosen, not measured: a block of a sealed partition holds far fewer rows.
 pub const MAX_VALUES: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

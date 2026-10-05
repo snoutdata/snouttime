@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 1.2: the background worker really does run the jobs.
+# The background worker really does run the jobs.
 #
 # This cannot be a #[pg_test] (each of those runs inside one transaction that is rolled
 # back, so a worker in another process would never see the rows) and it cannot be a

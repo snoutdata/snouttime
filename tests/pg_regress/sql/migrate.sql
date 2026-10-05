@@ -1,4 +1,4 @@
--- PLAN.md 1.2, option C: a migration moves several ranges per transaction and attaches them
+-- A migration moves several ranges per transaction and attaches them
 -- after ONE validated constraint on the default partition, so Postgres does not scan the
 -- default partition once per partition attached. Counted here with the default partition's
 -- own sequential-scan statistic.

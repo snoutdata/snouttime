@@ -1,4 +1,4 @@
-//! Floats (D6): each value XORed with the one before, as in Gorilla (Pelkonen et al., VLDB 2015).
+//! Floats: each value XORed with the one before, as in Gorilla (Pelkonen et al., VLDB 2015).
 //!
 //! Neighbouring readings of a gauge usually share their sign, exponent and leading mantissa
 //! bits, so their XOR is mostly zeros and only the bits in between are written. Per value after

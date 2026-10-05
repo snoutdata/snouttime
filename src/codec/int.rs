@@ -1,4 +1,4 @@
-//! Integers and timestamps (D6): the values, their deltas or their deltas-of-deltas, whichever
+//! Integers and timestamps: the values, their deltas or their deltas-of-deltas, whichever
 //! is smallest, bit-packed.
 //!
 //! A timestamp column taken at a steady interval has a constant delta, so its delta-of-delta is

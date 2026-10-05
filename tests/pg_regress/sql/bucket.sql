@@ -1,4 +1,4 @@
--- Phase 2.1: snouttime.bucket. Semantics in README.md ("Time buckets").
+-- snouttime.bucket. Semantics in README.md ("Time buckets").
 -- Most checks are properties over many times, printed as a count of violations (0), so a
 -- failure says which rule broke rather than which of a thousand values changed.
 SET client_min_messages = warning;

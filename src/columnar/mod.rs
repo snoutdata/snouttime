@@ -1,5 +1,4 @@
-//! Sealed partitions: the `snouttime_columnar` table access method (PLAN.md Phase 3,
-//! docs/snouttime/COLUMNAR.md).
+//! Sealed partitions: the `snouttime_columnar` table access method.
 //!
 //! * `format`: the bytes (pure Rust, tested without a server).
 //! * `store`: pages in and out.
@@ -8,7 +7,7 @@
 //! * `read`: reading one.
 //! * `am`: the access method's callbacks.
 //! * `dml`: inserts, deletes, updates and row locks after the seal.
-//! * `scan`: the custom scan that decodes only what a query reads (3.6).
+//! * `scan`: the custom scan that decodes only what a query reads.
 
 pub mod format;
 pub(crate) mod am;
@@ -41,10 +40,10 @@ pub static COMPRESSION: GucSetting<Compression> = GucSetting::<Compression>::new
 pub static ORDER_BY: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 pub static GROUP_ROWS: GucSetting<i32> = GucSetting::<i32>::new(8192);
 /// Off (the default): a new column store's non-unique indexes hold only its late rows, and the
-/// column store answers for the rest from its sort key and row-group ranges (PLAN.md Q5).
+/// column store answers for the rest from its sort key and row-group ranges.
 pub static KEEP_INDEXES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-// Tiering (PLAN.md Phase 5, D11). Credentials come from these settings or from the standard
+// Tiering. Credentials come from these settings or from the standard
 // AWS environment variables, never from a table: only a superuser can set or read them.
 static TIER_TO: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 static S3_ENDPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
@@ -61,7 +60,7 @@ pub static TIER_GC: GucSetting<bool> = GucSetting::<bool>::new(false);
 static mut PRELOADED: bool = false;
 
 /// Whether SnoutTime was loaded by shared_preload_libraries: `seal()` and `create_series()` say
-/// so when it was not (PLAN.md Q7). In Rust because only a superuser may read that setting.
+/// so when it was not. In Rust because only a superuser may read that setting.
 #[pgrx::pg_extern(stable, parallel_safe)]
 fn _preloaded() -> bool {
 	unsafe { PRELOADED }
@@ -306,7 +305,7 @@ pub unsafe extern "C-unwind" fn snouttime_columnar_handler(_fcinfo: pg_sys::Func
 
 extension_sql!(
 	r#"
--- The side tables of sealed partitions (docs/snouttime/COLUMNAR.md §1): a delta store and a
+-- The side tables of sealed partitions: a delta store and a
 -- delete log per partition, named after its OID. Each is made a MEMBER of the extension when
 -- it is created, which is what keeps pg_dump from dumping it: a partition's rows are dumped
 -- once, through the partition (a schema belonging to the extension is not enough; the tables

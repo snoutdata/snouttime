@@ -1,5 +1,5 @@
 #![no_main]
-//! Fuzzes the `bitmap` decoder: any bytes must give a value or an error, never a panic (R5).
+//! Fuzzes the `bitmap` decoder: any bytes must give a value or an error, never a panic.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 5: tiering against a real S3 implementation, MinIO, which checks every signature.
+# Tiering against a real S3 implementation, MinIO, which checks every signature.
 # Runs on the HOST (it starts containers): MinIO and the dev container on one network, then
 # tests/tier/inner.sh inside the dev container.
 #

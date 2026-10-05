@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 1.2: the worker the POSTMASTER starts (snouttime in shared_preload_libraries)
+# The worker the POSTMASTER starts (snouttime in shared_preload_libraries)
 # survives starting before the extension exists, which is the normal order: preload the
 # library, restart, then CREATE EXTENSION. It used to call run_due_job() at once, fail on
 # the missing schema and exit for good, so the database's jobs silently never ran (found

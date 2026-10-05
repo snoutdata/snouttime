@@ -1,10 +1,10 @@
-# SnoutTime build and test environment (docs/snouttime/PLAN.md D4).
+# SnoutTime build and test environment.
 #
 # Rust, cargo-pgrx and a pgrx-managed Postgres 17 built with assertions on, so a
 # broken invariant fails a test instead of passing quietly. Everything runs as the
 # unprivileged `dev` user because Postgres refuses to start as root.
 #
-# Versions are pinned. Bumping one is a deliberate commit (PLAN.md D1).
+# Versions are pinned. Bumping one is a deliberate commit.
 FROM docker.io/library/rust:1.98.1-bookworm
 
 ARG PGRX_VERSION=0.19.2
@@ -29,7 +29,7 @@ RUN cargo install --locked cargo-pgrx --version "${PGRX_VERSION}" \
 # Downloads and compiles Postgres 17 into ~/.pgrx with --enable-cassert.
 RUN cargo pgrx init --pg17 download
 
-# And Postgres 18 (PLAN.md D5: added after Phase 3), in its own layer so 17's build above is
+# And Postgres 18 (added after sealed partitions), in its own layer so 17's build above is
 # reused. `init` rewrites pgrx's config with exactly the versions it is given, so 17 is named
 # again by its pg_config.
 RUN cargo pgrx init --pg17 "$(ls -d ~/.pgrx/17.*/pgrx-install/bin)/pg_config" --pg18 download

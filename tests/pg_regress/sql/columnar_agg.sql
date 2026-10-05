@@ -1,4 +1,4 @@
--- Phase 3.6: aggregates computed on a sealed table's columns (`SnoutTime Columnar Aggregate`),
+-- Aggregates computed on a sealed table's columns (`SnoutTime Columnar Aggregate`),
 -- as the partial half of Postgres's own two-phase aggregate. Every query must return exactly
 -- what the same query returns on a heap twin, with and without the node, in parallel and per
 -- partition. Floats are multiples of a quarter, so their sums do not depend on the order rows

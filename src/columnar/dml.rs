@@ -1,4 +1,4 @@
-//! Writes to a sealed partition (PLAN.md 3.5, docs/snouttime/COLUMNAR.md §6).
+//! Writes to a sealed partition.
 //!
 //! * INSERT goes to the delta store, a heap table, unless the column store itself is being
 //!   built in this transaction (`build`).

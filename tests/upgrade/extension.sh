@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# PLAN.md Phase 6, U2 and U3: an existing database takes a new catalog with
+# An existing database takes a new catalog with
 # `ALTER EXTENSION snouttime UPDATE`, keeps its data, and ends with EXACTLY the catalog a fresh
 # install of the new version makes.
 #
 # For every earlier catalog in tests/upgrade/fixtures (each the install script a release, or a
 # rollout, generated; `snouttime--<version>-<label>.sql`):
-#   1. install it, with TODAY's library under it (U3: a new library must serve the old catalog
+#   1. install it, with TODAY's library under it (a new library must serve the old catalog
 #      until the UPDATE runs, which is the state every pod is in after an image rollout);
 #   2. give it data: a series with a sealed and a live partition, late rows, a rollup, its jobs;
 #   3. ALTER EXTENSION snouttime UPDATE;

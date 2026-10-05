@@ -1,4 +1,4 @@
--- Phase 4: rollups. The property checked everywhere: the rollup's view returns exactly what the
+-- Rollups. The property checked everywhere: the rollup's view returns exactly what the
 -- same aggregate computed from the raw rows returns, before a refresh, after one, and after
 -- late, updated, deleted and truncated rows, and through a rollup of a rollup.
 SET client_min_messages = warning;

@@ -1,4 +1,4 @@
--- PLAN.md Q5: a sealed partition is its own index on its sort key. The scan seeks by the
+-- A sealed partition is its own index on its sort key. The scan seeks by the
 -- first and last keys the directory keeps per row group, returns rows in the sort order either
 -- way (merging in late rows), and a non-unique index on a sealed partition holds only its late
 -- rows. Every query must return what Postgres's own plan returns, and what a heap twin with a
@@ -105,7 +105,7 @@ ANALYZE ev;
 SELECT sk_nodes('SELECT e.ts, c.v FROM ev e CROSS JOIN LATERAL (SELECT v FROM sk WHERE sk.host = e.host AND sk.ts <= e.ts ORDER BY sk.ts DESC LIMIT 1) c');
 SELECT sk_check('SELECT e.ts, e.host, c.v FROM ev e LEFT JOIN LATERAL (SELECT v FROM $t WHERE $t.host = e.host AND $t.ts <= e.ts ORDER BY $t.ts DESC LIMIT 1) c ON true ORDER BY e.ts, e.host') AS asof_same;
 
--- one value's late rows streamed from the late-rows index (PLAN.md 3.5): many late rows and
+-- one value's late rows streamed from the late-rows index: many late rows and
 -- deletes for one host, read in either direction, stopped by a LIMIT or not, and through a
 -- LATERAL that rescans once per host. sk_host_ts runs against the order (ts DESC), so this is
 -- the stream read backward to go forward

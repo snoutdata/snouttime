@@ -21,12 +21,12 @@ CREATE TABLE snouttime.series (
 	premake int4 NOT NULL DEFAULT 4 CHECK (premake BETWEEN 1 AND 1000),
 	-- Optional second key: each time partition is itself hash-partitioned on this column,
 	-- which spreads one interval's writes over several tables when the series has many
-	-- distinct devices, hosts or sensors (PLAN.md 1.4).
+	-- distinct devices, hosts or sensors.
 	space_column name,
 	space_partitions int4 CHECK (space_partitions BETWEEN 2 AND 1024),
 	retention interval,
 	retention_width int8,
-	-- Sealing (PLAN.md 3.4): a partition is rewritten into the column store once its range
+	-- Sealing: a partition is rewritten into the column store once its range
 	-- ended this long ago (the settle window). NULL: never sealed by the worker.
 	seal_after interval,
 	seal_after_width int8,
@@ -34,9 +34,9 @@ CREATE TABLE snouttime.series (
 	-- Order within a column store; NULL means the space key (if any), then time.
 	seal_order_by name[],
 	-- Whether a sealed partition's non-unique indexes cover every row, or only its late rows
-	-- (PLAN.md Q5; unique indexes always cover every row).
+	-- (unique indexes always cover every row).
 	seal_keep_indexes boolean NOT NULL DEFAULT false,
-	-- Tiering (PLAN.md Phase 5): a partition goes to S3 once its range ended this long ago.
+	-- Tiering: a partition goes to S3 once its range ended this long ago.
 	tier_after interval,
 	tier_after_width int8,
 	created_at timestamptz NOT NULL DEFAULT now(),
@@ -50,7 +50,7 @@ CREATE TABLE snouttime.series (
 	CHECK ((space_column IS NULL) = (space_partitions IS NULL))
 );
 
--- A rollup (PLAN.md Phase 4): a view over materialized buckets plus the raw rows newer than
+-- A rollup: a view over materialized buckets plus the raw rows newer than
 -- the watermark. The source is a series table, or another rollup (a rollup of a rollup).
 CREATE TABLE snouttime.rollups (
 	relid regclass PRIMARY KEY,
@@ -83,7 +83,7 @@ CREATE TABLE snouttime.invalidations (
 CREATE INDEX invalidations_rollup_lo ON snouttime.invalidations (rollup, lo);
 
 -- What a table took as heap just before its first seal, so "how much did sealing save" has an
--- answer after the heap is gone (PLAN.md Phase 8). Kept through a reseal and a tier, which
+-- answer after the heap is gone. Kept through a reseal and a tier, which
 -- start from a column store; dropped by an unseal and with the table.
 CREATE TABLE snouttime.seal_sizes (
 	relid regclass PRIMARY KEY,
@@ -237,7 +237,7 @@ CREATE AGGREGATE snouttime.counter_rate(value double precision, at timestamptz) 
 --   catalog
 
 
--- The side tables of sealed partitions (docs/snouttime/COLUMNAR.md §1): a delta store and a
+-- The side tables of sealed partitions: a delta store and a
 -- delete log per partition, named after its OID. Each is made a MEMBER of the extension when
 -- it is created, which is what keeps pg_dump from dumping it: a partition's rows are dumped
 -- once, through the partition (a schema belonging to the extension is not enough; the tables
@@ -466,7 +466,7 @@ COMMENT ON FUNCTION snouttime.interpolate(double precision, timestamptz) IS
 -- requires:
 --   catalog
 
--- Series tables (PLAN.md Phase 1.1). See series.rs for why this is SQL.
+-- Series tables. See series.rs for why this is SQL.
 --
 -- How a table becomes a series table:
 --
@@ -1218,7 +1218,7 @@ END
 $$;
 
 
--- How many ranges one migration transaction moves (PLAN.md 1.2, option C, chosen
+-- How many ranges one migration transaction moves (chosen
 -- 2026-09-23): enough that the whole default partition is moved in about eight
 -- transactions, whatever its span. Estimated from the oldest and newest row, which the
 -- time index answers without a scan.
@@ -1242,7 +1242,7 @@ $$;
 
 
 -- Move the rows of up to `max_ranges` partition ranges out of the default partition, in
--- the caller's transaction (PLAN.md 1.2, option C).
+-- the caller's transaction.
 --
 -- Attaching a partition to a table that has a default partition makes Postgres scan the
 -- default partition, to prove no row there belongs to the new range, unless a VALIDATED
@@ -1532,7 +1532,7 @@ $$;
 --   catalog
 --   series
 
--- The jobs (PLAN.md Phase 1.2): making partitions ahead, emptying the default partition,
+-- The jobs: making partitions ahead, emptying the default partition,
 -- and dropping what is past its retention.
 --
 -- The background worker (worker.rs) does nothing but call `snouttime.run_due_job()` in a
@@ -1732,7 +1732,7 @@ BEGIN
 END
 $$;
 
--- A one-off retention (PLAN.md 1.3): drop every whole partition that ends at or before
+-- A one-off retention: drop every whole partition that ends at or before
 -- `before`, by the same rules. Returns how many it dropped.
 CREATE FUNCTION snouttime.drop_before(relation regclass, before timestamptz) RETURNS integer
 LANGUAGE plpgsql
@@ -1965,8 +1965,8 @@ GRANT EXECUTE ON FUNCTION snouttime.run_due_job() TO PUBLIC;
 --   jobs
 --   columnar
 
--- Sealing (PLAN.md 3.4): rewriting old partitions into the column store, by hand or by the
--- worker, and undoing it. docs/snouttime/COLUMNAR.md §7 has the locks.
+-- Sealing: rewriting old partitions into the column store, by hand or by the
+-- worker, and undoing it.
 --
 -- A seal is `ALTER TABLE <leaf> SET ACCESS METHOD snouttime_columnar` with the series table's
 -- order and codec in force for that one statement. With a space key a time partition is
@@ -2028,7 +2028,7 @@ AS $$
 $$;
 
 -- Whether a seal keeps non-unique indexes whole: the series table's choice, or for a table
--- that is not a partition of one, snouttime.columnar_keep_indexes (PLAN.md Q5).
+-- that is not a partition of one, snouttime.columnar_keep_indexes.
 CREATE FUNCTION snouttime._keep_indexes(s snouttime.series) RETURNS boolean
 LANGUAGE sql STABLE
 AS $$
@@ -2038,7 +2038,7 @@ AS $$
 $$;
 
 -- Without the library in shared_preload_libraries, a session plans its first query before
--- SnoutTime's planner hooks exist, and the worker does not run at all (PLAN.md Q7).
+-- SnoutTime's planner hooks exist, and the worker does not run at all.
 CREATE FUNCTION snouttime._note_unless_preloaded() RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -2114,7 +2114,7 @@ BEGIN
 END
 $$;
 
--- Tiering (PLAN.md Phase 5, D11): the partition's column store goes to S3 as one object, and
+-- Tiering: the partition's column store goes to S3 as one object, and
 -- only its metapage and directory stay here; queries read the row groups they need from S3.
 -- Late writes and deletes still work (delta store, delete log). Returns tables rewritten.
 CREATE FUNCTION snouttime.tier(partition regclass) RETURNS integer
@@ -2250,7 +2250,7 @@ END
 $$;
 
 -- Rebuilds a sealed partition's column store with its delta store folded in and its deletes
--- applied (PLAN.md 3.5). Two rewrites: back to heap, then into a new column store.
+-- applied. Two rewrites: back to heap, then into a new column store.
 CREATE FUNCTION snouttime.reseal(partition regclass) RETURNS integer
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -2440,7 +2440,7 @@ $$;
 --   jobs
 --   seal
 
--- What is there, and what it costs (PLAN.md Phase 1.5).
+-- What is there, and what it costs.
 --
 -- Both views read the catalogs and the planner's own statistics only. Nothing here scans a
 -- table, so asking what a series table looks like is cheap however much data it holds, and
@@ -2456,7 +2456,7 @@ SELECT
 	CASE
 		WHEN c.oid = snouttime._default_partition(s.relid) THEN 'default'
 		WHEN b.lo IS NULL THEN 'foreign'   -- a partition SnoutTime did not make and will not touch
-		-- rewritten into the column store (PLAN.md 3.4); with a space key, every leaf is
+		-- rewritten into the column store; with a space key, every leaf is
 		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_tiered(t.relid))
 			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
 				WHERE l.relkind = 'r' AND NOT snouttime._is_tiered(t.relid)) THEN 'tiered'
@@ -2560,7 +2560,7 @@ GRANT SELECT ON snouttime.partition_info, snouttime.series_info, snouttime.job_i
 --   jobs
 --   seal
 
--- Rollups (PLAN.md Phase 4, D8, D9): an aggregate over time buckets of a series table, kept
+-- Rollups: an aggregate over time buckets of a series table, kept
 -- materialized by refreshing only what changed, and read through a view that is never stale.
 --
 --   snouttime.create_rollup('cpu_hourly', 'cpu', interval '1 hour',

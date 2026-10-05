@@ -1,4 +1,4 @@
-# Only what a build compiles goes into a build context: the bench image (bench/container) and
+# Only what a build compiles goes into a build context: the benchmark image and
 # the Cloud pod image (scripts/build-dist.sh, as a named context) read Cargo.*, rust-toolchain.toml,
 # snouttime.control, src/, sql/ (the upgrade scripts) and scripts/. The fuzz corpus alone is 36 MB.
 fuzz

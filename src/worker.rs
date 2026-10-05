@@ -1,4 +1,4 @@
-//! The background worker (PLAN.md Phase 1.2, D10).
+//! The background worker.
 //!
 //! It holds no logic of its own: it wakes up, calls `snouttime.run_due_job()` until that
 //! says nothing is due, and sleeps again. Each call is its own transaction, so one job's

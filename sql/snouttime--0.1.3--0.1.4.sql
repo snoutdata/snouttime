@@ -1,4 +1,4 @@
--- SnoutTime 0.1.3 -> 0.1.4 (docs/snouttime/PLAN.md 3.6, found by the published re-run).
+-- SnoutTime 0.1.3 -> 0.1.4 (found by the published benchmark re-run).
 --
 -- Nothing in the catalog changes: 0.1.4 is in the library, and reads and writes what 0.1.3
 -- does (format version 3). A scan kept its decoded row groups within work_mem by summing every

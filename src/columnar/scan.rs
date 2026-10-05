@@ -1,4 +1,4 @@
-//! Fast scans of sealed partitions (PLAN.md 3.6): a custom scan node, `SnoutTime Columnar
+//! Fast scans of sealed partitions: a custom scan node, `SnoutTime Columnar
 //! Scan`, that decodes only the columns a query uses and skips whole row groups whose minimum
 //! and maximum cannot satisfy its WHERE clause.
 //!
@@ -463,7 +463,7 @@ pub(super) unsafe fn runtime_estimates(root: *mut pg_sys::PlannerInfo, clauses: 
 }
 
 /// A sealed relation's non-unique indexes that hold only its delta store's rows are taken out of
-/// what the planner knows (PLAN.md Q5): an index scan on one would miss every sealed row, and
+/// what the planner knows: an index scan on one would miss every sealed row, and
 /// so would anything else the planner reads an index for (the actual minimum or maximum of a
 /// column, when it estimates a range). Unique indexes, and exclusion constraints', stay.
 #[pg_guard]
@@ -909,7 +909,7 @@ struct DeltaRow {
 
 /// One value's late rows read from a late-rows index in the scan's direction, one row ahead of
 /// the merge, and no further than the scan goes. At 1% late rows, "the last 10 of one host"
-/// fetched and sorted all ~1,000 of that host's late rows to return ten (PLAN.md 3.5). Used when
+/// fetched and sorted all ~1,000 of that host's late rows to return ten. Used when
 /// the seek is only an equality on the first sort column and an index follows the rest of the
 /// order; kept open across rescans, each moving it to its value.
 struct DeltaStream {
@@ -1365,7 +1365,7 @@ impl State {
 	/// When the seek fixes the first sort column (`host = 'host_7'`) and a late-rows index leads
 	/// with it, only that value's rows are read, through the index, and kept per value: reading
 	/// and sorting the WHOLE delta store for one host was 97 ms of a 0.24 ms lookup at 1% late
-	/// rows on a 10M-row partition (bench/late.sh, 2026-09-24). An as-of join that rescans once
+	/// rows on a 10M-row partition (measured 2026-09-24). An as-of join that rescans once
 	/// per event reads each host's rows once, which is no more than the whole store once. Past
 	/// DELTA_VALUES distinct values, and whenever the index cannot answer, the whole store is
 	/// read and sorted once per scan, as before.

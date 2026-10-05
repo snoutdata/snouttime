@@ -7,9 +7,9 @@
 #
 #   bash scripts/build-dist.sh 17 /out        # inside a rust:<version>-bookworm container
 #
-# This is the one recipe for a SnoutTime build that ships (PLAN.md Phase 7): the SnoutData Cloud
+# This is the one recipe for a SnoutTime build that ships: the SnoutData Cloud
 # pod image runs it in a build stage, with this package as a named build context, so the pod
-# image depends on this package's build output and never the reverse (R3). It expects Debian
+# image depends on this package's build output and never the reverse. It expects Debian
 # bookworm with the Rust toolchain rust-toolchain.toml names, and fetches the rest: the pgdg
 # server headers for the major, and cargo-pgrx at the version Cargo.toml pins.
 set -euo pipefail
@@ -53,7 +53,7 @@ cargo install --locked cargo-pgrx --version "$pgrx"
 cargo pgrx init "--pg${major}" "$pg_config"
 
 # A copy to build in, so the build context stays read-only. `cargo pgrx install --release` is
-# what bench/container/Containerfile does, so the build that is benchmarked is the build that
+# what the benchmark image does, so the build that is benchmarked is the build that
 # ships.
 work="$(mktemp -d)"
 # sql/ holds the upgrade scripts (snouttime--<from>--<to>.sql), which `cargo pgrx install` copies

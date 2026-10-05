@@ -1,4 +1,4 @@
-//! The jobs a series table needs doing over time (PLAN.md Phase 1.2).
+//! The jobs a series table needs doing over time.
 //!
 //! The SQL is in `jobs.sql`; `worker.rs` is the background worker that calls it. What lives
 //! here is the one part SQL cannot do: running a job as its table's owner in a way the job

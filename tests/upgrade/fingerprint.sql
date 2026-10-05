@@ -1,6 +1,6 @@
 -- Everything the extension owns, as text with no OIDs in it, one line per fact, sorted: two
 -- databases whose outputs are identical have the same SnoutTime catalog. Used by extension.sh to
--- compare an UPGRADED database with a FRESH install of the same version (PLAN.md Phase 6, U2).
+-- compare an UPGRADED database with a FRESH install of the same version.
 -- pg_dump cannot do this: it writes CREATE EXTENSION for an extension and nothing it owns.
 WITH owned AS (
 	SELECT d.classid, d.objid

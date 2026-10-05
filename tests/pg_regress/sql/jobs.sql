@@ -1,4 +1,4 @@
--- Phase 1.2: the jobs, run by hand. The worker that calls them on a timer has its own
+-- The jobs, run by hand. The worker that calls them on a timer has its own
 -- test (src/worker.rs), because a regression test cannot wait for one.
 SET client_min_messages = notice;
 SET timezone = 'UTC';

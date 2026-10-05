@@ -1,4 +1,4 @@
-//! Filling gaps (PLAN.md Phase 2.1): `locf(value)` and `interpolate(value [, at])`, WINDOW
+//! Filling gaps: `locf(value)` and `interpolate(value [, at])`, WINDOW
 //! functions used over the rows `gapfill` produced (or any ordered rows):
 //!
 //! ```sql

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fuzz every decoder of untrusted bytes (docs/snouttime/PLAN.md 3.2, R5).
+# Fuzz every decoder of untrusted bytes (CONTRIBUTING.md, R5).
 #
 #   bash scripts/fuzz.sh [seconds per target, default 60] [target ...]
 #

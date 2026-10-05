@@ -1,4 +1,4 @@
-//! Series tables (PLAN.md Phase 1.1): turning a table into a natively range-partitioned
+//! Series tables: turning a table into a natively range-partitioned
 //! one on its time column, and back out of the catalog again.
 //!
 //! The SQL is in `series.sql`. It is PL/pgSQL rather than Rust because every step is DDL

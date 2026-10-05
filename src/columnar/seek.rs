@@ -1,4 +1,4 @@
-//! A sealed partition as its own index on its sort key (PLAN.md Q5).
+//! A sealed partition as its own index on its sort key.
 //!
 //! A column store sorted by `(a, b, ...)` keeps each row group's first and last key in its
 //! directory, so the row groups that can hold a key range are a contiguous run found by binary

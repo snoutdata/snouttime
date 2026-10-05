@@ -1,4 +1,4 @@
--- Series tables (PLAN.md Phase 1.1). See series.rs for why this is SQL.
+-- Series tables. See series.rs for why this is SQL.
 --
 -- How a table becomes a series table:
 --
@@ -750,7 +750,7 @@ END
 $$;
 
 
--- How many ranges one migration transaction moves (PLAN.md 1.2, option C, chosen
+-- How many ranges one migration transaction moves (chosen
 -- 2026-09-23): enough that the whole default partition is moved in about eight
 -- transactions, whatever its span. Estimated from the oldest and newest row, which the
 -- time index answers without a scan.
@@ -774,7 +774,7 @@ $$;
 
 
 -- Move the rows of up to `max_ranges` partition ranges out of the default partition, in
--- the caller's transaction (PLAN.md 1.2, option C).
+-- the caller's transaction.
 --
 -- Attaching a partition to a table that has a default partition makes Postgres scan the
 -- default partition, to prove no row there belongs to the new range, unless a VALIDATED

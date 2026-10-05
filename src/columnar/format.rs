@@ -1,4 +1,4 @@
-//! The on-disk format of a sealed partition's column store (docs/snouttime/COLUMNAR.md §2-§3),
+//! The on-disk format of a sealed partition's column store,
 //! as pure Rust: no Postgres in here, so it is unit-tested and fuzzed without a server. The
 //! access method (`super`) turns tuples into [`Column`]s and back and moves the bytes to and
 //! from pages; everything about what the bytes MEAN is here.
@@ -40,7 +40,7 @@
 //! reader reads version 2; the version is what keeps an older build from reading a paged chunk
 //! as damage.
 //!
-//! Every decoder here is as strict as the codecs (R5): a length past the end, an unknown
+//! Every decoder here is as strict as the codecs: a length past the end, an unknown
 //! encoding, a value count that disagrees with the null bitmap, or a checksum that does not
 //! match is a [`CodecError`], never a panic.
 
@@ -52,7 +52,7 @@ pub const VERSION: u32 = 3;
 pub const OLDEST_VERSION: u32 = 2;
 
 /// Meta flag: the relation's non-unique indexes hold only its delta store's rows, so the
-/// planner must never use one to find a column-store row (PLAN.md Q5).
+/// planner must never use one to find a column-store row.
 pub const FLAG_LATE_INDEXES: u8 = 1;
 
 /// A row group records where its runs of the leading sort columns end only up to this many:
@@ -180,7 +180,7 @@ pub struct Meta {
 	pub dir_crc: u32,
 	/// The type OID of each attribute at seal time; 0 for a dropped one.
 	pub types: Vec<u32>,
-	/// A tiered column store (PLAN.md Phase 5): its row groups are in an object in S3, and
+	/// A tiered column store: its row groups are in an object in S3, and
 	/// only this metapage and the directory are in the relation's own pages.
 	pub remote: Option<Remote>,
 	/// The attributes (1-based) the rows are sorted by, each ascending with NULLs last; empty

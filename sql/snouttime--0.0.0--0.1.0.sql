@@ -1,4 +1,4 @@
--- SnoutTime 0.0.0 -> 0.1.0 (docs/snouttime/PLAN.md Phase 6, U1 and U6).
+-- SnoutTime 0.0.0 -> 0.1.0.
 --
 -- 0.1.0 is the first versioned catalog. Before it, every build called itself 0.0.0, and two
 -- shapes of 0.0.0 ran in SnoutData Cloud: the first rollout (2026-09-23, before seal sizes) and
@@ -11,7 +11,7 @@
 
 \echo Use "ALTER EXTENSION snouttime UPDATE TO '0.1.0'" to load this file. \quit
 
--- What a table took as heap just before its first seal (Phase 8).
+-- What a table took as heap just before its first seal.
 CREATE TABLE IF NOT EXISTS snouttime.seal_sizes (
 	relid regclass PRIMARY KEY,
 	bytes_before int8 NOT NULL,
@@ -143,7 +143,7 @@ SELECT
 	CASE
 		WHEN c.oid = snouttime._default_partition(s.relid) THEN 'default'
 		WHEN b.lo IS NULL THEN 'foreign'   -- a partition SnoutTime did not make and will not touch
-		-- rewritten into the column store (PLAN.md 3.4); with a space key, every leaf is
+		-- rewritten into the column store; with a space key, every leaf is
 		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_tiered(t.relid))
 			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
 				WHERE l.relkind = 'r' AND NOT snouttime._is_tiered(t.relid)) THEN 'tiered'

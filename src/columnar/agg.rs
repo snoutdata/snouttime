@@ -1,4 +1,4 @@
-//! Aggregates computed on a sealed table's decoded columns (PLAN.md 3.6), without forming a row
+//! Aggregates computed on a sealed table's decoded columns, without forming a row
 //! per input row: `SnoutTime Columnar Aggregate`.
 //!
 //! Postgres plans a grouped query in two halves when it can: a partial aggregate under the

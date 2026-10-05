@@ -1,4 +1,4 @@
-//! What is there and what it costs (PLAN.md Phase 1.5): three views over the catalog.
+//! What is there and what it costs: three views over the catalog.
 //!
 //! The SQL is in `info.sql`.
 

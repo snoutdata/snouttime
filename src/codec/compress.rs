@@ -1,4 +1,4 @@
-//! The frame one encoded column block is stored in (D6): the encodings above remove what is
+//! The frame one encoded column block is stored in: the encodings above remove what is
 //! predictable about a column, and a general-purpose compressor then takes what is left.
 //! LZ4 decompresses fastest; zstd is smaller. The choice is the series table's `codec`.
 //!
@@ -9,11 +9,11 @@
 
 use super::{put_varint, CodecError, Input, Result};
 
-/// The largest block, uncompressed. A format limit, chosen (PLAN.md "Chosen"): it bounds what a
+/// The largest block, uncompressed. A format limit, chosen rather than measured: it bounds what a
 /// corrupt length can make a decoder allocate, and the block writer splits a block before it.
 pub const MAX_RAW_BYTES: usize = 64 << 20;
 
-/// zstd's level. Chosen, not measured yet (3.8 measures it).
+/// zstd's level. Chosen, not measured yet.
 pub const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

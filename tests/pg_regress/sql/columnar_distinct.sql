@@ -1,4 +1,4 @@
--- Phase 3.6: the last point per key (`SnoutTime Columnar Distinct`): DISTINCT ON over a sealed
+-- The last point per key (`SnoutTime Columnar Distinct`): DISTINCT ON over a sealed
 -- relation chooses each key's row from the key and time columns alone, then fetches only those
 -- rows. Every query must return what Postgres's own plan returns, and what a heap twin returns.
 -- The ordering column is unique within a key, since DISTINCT ON's choice between rows that tie

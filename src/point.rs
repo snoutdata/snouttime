@@ -1,4 +1,4 @@
-//! `first(value, at)` and `last(value, at)` (PLAN.md Phase 2.2, D9): the value at the earliest
+//! `first(value, at)` and `last(value, at)`: the value at the earliest
 //! or latest `at` in a group.
 //!
 //! * `value` is any type; `at` is `timestamptz`, `timestamp`, `date`, `bigint` or `integer`.
@@ -7,7 +7,7 @@
 //! * Rows with the same `at` are a tie, and which of them wins is not defined (it depends on
 //!   the order rows arrive in, which a parallel plan does not fix). Break a tie by making `at`
 //!   unique.
-//! * The state combines (D9: a rollup is built from partial states), serialises for parallel
+//! * The state combines (a rollup is built from partial states), serialises for parallel
 //!   aggregation through the value type's own binary send/receive functions, and so works for
 //!   any type that has them, which is every built-in one.
 //!
@@ -466,7 +466,7 @@ mod tests {
 // GROUP BY does not give, so a point earlier than the one before it is an ERROR naming the fix
 // (ORDER BY at) rather than a wrong number. Points with a NULL value or time are skipped.
 //
-// The state merges (D9). It is a list of disjoint time SEGMENTS, each with its first and last
+// The state merges. It is a list of disjoint time SEGMENTS, each with its first and last
 // point and the increase inside it, kept sorted: a combine function is called in whatever
 // order the planner likes (a finalize step combined day 1 with day 3 before day 2, found by the
 // regression test), so two states cannot be joined into one summary until it is known that

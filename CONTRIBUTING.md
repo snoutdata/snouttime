@@ -43,8 +43,8 @@ never reads out of bounds.
 ## R6: Claims discipline
 
 Nothing outside the repo says "faster than TimescaleDB", "drop-in replacement" or "compatible
-with TimescaleDB" unless the benchmark harness has measured it and the number is recorded in the
-plan.
+with TimescaleDB" unless the benchmark harness has measured it and the number is published
+with its date, hardware and command (R7).
 
 ## R7: This work is published from
 

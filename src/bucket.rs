@@ -1,4 +1,4 @@
-//! Time buckets (PLAN.md Phase 2.1): `snouttime.bucket(width, time [, origin | timezone])`.
+//! Time buckets: `snouttime.bucket(width, time [, origin | timezone])`.
 //!
 //! A bucket is the start of the width-sized interval, counted from an origin, that holds a
 //! time. The semantics, which the regression test `bucket` holds to, are in README.md; in

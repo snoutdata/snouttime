@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Everything that must pass, in the order that fails fastest:
-#   1. licences of every dependency (PLAN.md R4)
+#   1. licences of every dependency (deny.toml)
 #   2. Rust tests, plain and in-database (#[test] and #[pg_test])
 #   3. SQL regression tests (tests/pg_regress/sql → tests/pg_regress/expected)
 #
@@ -17,7 +17,7 @@ if [ $# -gt 0 ]; then
 	exec bash "$here/dev.sh" cargo pgrx test pg17 "$1"
 fi
 
-# Every Postgres version SnoutTime supports (PLAN.md D5), one after the other.
+# Every Postgres version SnoutTime supports, one after the other.
 versions="${SNOUTTIME_PG_VERSIONS:-17 18}"
 exec bash "$here/dev.sh" bash -c '
 	set -euo pipefail

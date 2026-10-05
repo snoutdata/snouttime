@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 0.3: a pg_dump + pg_restore of a database using SnoutTime keeps every catalog
+# A pg_dump + pg_restore of a database using SnoutTime keeps every catalog
 # row, and resolves each regclass to the restored table rather than to a stale OID.
 #
 # Runs inside the dev container (scripts/test.sh calls it). Uses the pgrx-managed
@@ -68,7 +68,7 @@ if [ "$runs" != 0 ]; then
 fi
 echo "PASS dump roundtrip"
 
-# PLAN.md 3.7: a sealed table survives dump and restore with the same rows, counted once.
+# A sealed table survives dump and restore with the same rows, counted once.
 # Its side tables are in the extension's schema and must not be dumped: the rows in them are
 # dumped through the table itself, and dumping both would restore every late row twice.
 for db in st_seal_src st_seal_dst; do

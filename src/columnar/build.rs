@@ -1,4 +1,4 @@
-//! Building a column store (docs/snouttime/COLUMNAR.md §7): rows given to a relation whose
+//! Building a column store: rows given to a relation whose
 //! relfilenode was created in this transaction are buffered, sorted by
 //! `snouttime.columnar_order_by`, and encoded into row groups when the buffer is flushed.
 //!
@@ -241,7 +241,7 @@ unsafe fn write(rel: pg_sys::Relation, builder: &Builder) {
 	}
 	pg_sys::CurrentResourceOwner = old_owner;
 
-	// A tiered table (PLAN.md Phase 5) writes its row groups to a file that becomes an object
+	// A tiered table writes its row groups to a file that becomes an object
 	// in S3; everything else, its own pages.
 	let tier_to = if super::is_tiered(rel) { Some(super::tier_location(rel)) } else { None };
 	let mut file: Option<FileSink> = None;

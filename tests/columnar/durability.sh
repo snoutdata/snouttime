@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 3.7: a sealed partition survives what a database has to survive. In throwaway
+# A sealed partition survives what a database has to survive. In throwaway
 # clusters of the pgrx-built Postgres 17 (none of it touches the test cluster):
 #
 #   crash    kill -9 the postmaster in the middle of a seal: after recovery the table is

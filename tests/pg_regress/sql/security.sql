@@ -1,4 +1,4 @@
--- Phase 6: what a role that is not a superuser can and cannot do (PLAN.md Phase 6's security
+-- What a role that is not a superuser can and cannot do (from a security
 -- review). S3 credentials are unreadable and unsettable, the object collector is not
 -- callable, and the extension's SECURITY DEFINER helpers act only for a table's owner.
 SET client_min_messages = warning;

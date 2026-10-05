@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 3.7: pg_upgrade from Postgres 17 to 18 with a sealed table (column store, delta store
+# pg_upgrade from Postgres 17 to 18 with a sealed table (column store, delta store
 # and delete log), a series table with a sealed partition, and a rollup. pg_upgrade carries the
 # relation files over as they are, so what this proves is that the new server reads the old
 # column store, and that the extension's own objects (the side tables are extension members)

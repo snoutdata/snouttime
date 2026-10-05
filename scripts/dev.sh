@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one command inside the SnoutTime dev container (docs/snouttime/PLAN.md D4).
+# Run one command inside the SnoutTime dev container.
 #
 #   bash scripts/dev.sh cargo pgrx test pg17
 #

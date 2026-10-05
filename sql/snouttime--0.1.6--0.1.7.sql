@@ -1,4 +1,4 @@
--- SnoutTime 0.1.6 -> 0.1.7 (docs/snouttime/PLAN.md Phase 6, U1; the Log, 2026-10-04).
+-- SnoutTime 0.1.6 -> 0.1.7 (2026-10-04).
 --
 -- A job runs as its table's owner in a security-restricted operation. The worker is a
 -- superuser, and run_due_job() used to switch to the owner with SET LOCAL ROLE, which code of

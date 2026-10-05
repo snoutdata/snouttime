@@ -1,4 +1,4 @@
--- Phase 2.4: snouttime.window_join. Semantics in README.md ("Window join").
+-- snouttime.window_join. Semantics in README.md ("Window join").
 SET client_min_messages = warning;
 
 CREATE TABLE w_right AS

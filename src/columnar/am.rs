@@ -1,4 +1,4 @@
-//! The table access method's callbacks (docs/snouttime/COLUMNAR.md §4-§7).
+//! The table access method's callbacks.
 //!
 //! Every callback is `#[pg_guard]`: a Rust panic becomes a Postgres ERROR, never a crash.
 //! Column-store rows come back in virtual slots; delta-store rows are read through the heap
@@ -852,7 +852,7 @@ unsafe extern "C-unwind" fn index_build_range_scan(
 	}
 	let all = numblocks == pg_sys::InvalidBlockNumber;
 	// A non-unique index on a store sealed without keep_indexes holds only the delta store's
-	// rows (PLAN.md Q5): the column store answers for its own rows by its sort key, and the
+	// rows: the column store answers for its own rows by its sort key, and the
 	// planner never sees such an index (`scan::relation_info`). A unique index, or one behind
 	// an exclusion constraint, enforces something, so it always covers every row.
 	// Whether it is unique is read from the index itself, not from `index_info`: a rebuild that

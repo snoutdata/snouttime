@@ -1,4 +1,4 @@
-//! Percentile sketches (PLAN.md Phase 2.3, D9): the merging t-digest.
+//! Percentile sketches: the merging t-digest.
 //!
 //! Written from the paper, T. Dunning and O. Ertl, "Computing Extremely Accurate Quantiles
 //! Using t-Digests" (2019): values are gathered into centroids (a mean and a weight), and how
@@ -6,7 +6,7 @@
 //! k1(q) = δ / 2π · asin(2q − 1), which keeps centroids near the tails small, so extreme
 //! quantiles stay accurate. Incoming values are buffered and merged into the centroids in
 //! batches. Two digests merge by pooling their centroids and compressing again, which is what
-//! makes the state a rollup can keep (D9).
+//! makes the state a rollup can keep.
 //!
 //! SQL:
 //!
@@ -15,7 +15,7 @@
 //! * `merge(tdigest)` aggregate → one `tdigest` from many
 //!
 //! NULL and NaN values are skipped. The text form is JSON, and any `tdigest` read from text
-//! or disk is validated before it is used (R5: a corrupt one is an ERROR, never a crash).
+//! or disk is validated before it is used (a corrupt one is an ERROR, never a crash).
 
 use pgrx::prelude::*;
 use pgrx::{InOutFuncs, StringInfo};

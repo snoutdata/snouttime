@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 1.6: inserts from several sessions keep working, and lose nothing, while the
+# Inserts from several sessions keep working, and lose nothing, while the
 # worker is making partitions, moving rows out of the default partition and dropping old
 # ones underneath them.
 #

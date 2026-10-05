@@ -1,4 +1,4 @@
-//! Booleans, and which rows of a column are null (D6).
+//! Booleans, and which rows of a column are null.
 //!
 //! Layout: count (varint), then a mode byte. Mode 0: every value false. Mode 1: every value
 //! true. Mode 2: one bit per value, least significant first, zero-padded; used only when the

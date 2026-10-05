@@ -1,4 +1,4 @@
--- Phase 3.4: sealing partitions of a series table, by hand and by the worker's job, and what
+-- Sealing partitions of a series table, by hand and by the worker's job, and what
 -- a sealed partition does afterwards. Everything is compared with a heap twin.
 SET client_min_messages = warning;
 SET timezone = 'UTC';

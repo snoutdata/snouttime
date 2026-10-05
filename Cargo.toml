@@ -10,29 +10,29 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
-# PLAN.md D5: Postgres 17 first; 18 added once Phase 3 was built (2026-09-23).
+# Postgres 17 first; 18 added once sealed partitions were built (2026-09-23).
 [features]
 default = ["pg17"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
 
-# Pinned exactly, with cargo-pgrx in container/Containerfile: the two must match (PLAN.md D1).
+# Pinned exactly, with cargo-pgrx in container/Containerfile: the two must match.
 [dependencies]
 pgrx = "=0.19.2"
-# For the sketch types (PLAN.md 2.3): pgrx stores a derived type as CBOR through serde, and the
+# For the sketch types: pgrx stores a derived type as CBOR through serde, and the
 # text form is JSON. All three are already in pgrx's own tree.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_cbor = "0.11"
-# Block compression for sealed partitions (PLAN.md 3.2, D6). lz4_flex is pure Rust with its
+# Block compression for sealed partitions. lz4_flex is pure Rust with its
 # checked decoder; zstd binds the reference C library (BSD), built from source.
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 zstd = { version = "=0.14.0", default-features = false }
-# Tiering to S3 (PLAN.md Phase 5): a blocking HTTP client with rustls, and SigV4 signing.
+# Tiering to S3: a blocking HTTP client with rustls, and SigV4 signing.
 # Certificates are checked against the OS trust store, read by rustls-native-certs, not a
 # bundled root list: every bundle of Mozilla's roots (webpki-roots, webpki-root-certs) is
-# CDLA-Permissive-2.0, outside R4's allowlist, and the OS store also honours an
+# CDLA-Permissive-2.0, outside deny.toml's allowlist, and the OS store also honours an
 # organisation's own CA.
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls-no-provider", "_ring"] }
 rustls-native-certs = "=0.8.4"

@@ -1,12 +1,11 @@
-//! Pages: moving the column store's byte stream to and from the relation's main fork
-//! (docs/snouttime/COLUMNAR.md §2).
+//! Pages: moving the column store's byte stream to and from the relation's main fork.
 //!
 //! Block 0 is the metapage; blocks 1 and on carry the stream, `DATA` bytes each, right after
 //! the standard page header. Every page is a valid standard page with no hole (`pd_lower` =
 //! `pd_upper` = the end of its data), so a full-page image in the WAL carries every byte,
 //! and page checksums and `pg_checksums` work unchanged.
 //!
-//! Writing goes through Postgres 17's bulk-write API (C2 in COLUMNAR.md; D7 as amended): the
+//! Writing goes through Postgres 17's bulk-write API: the
 //! pages of a new relfilenode, WAL-logged as full-page images when the relation needs WAL,
 //! and synced before commit when it does not.
 

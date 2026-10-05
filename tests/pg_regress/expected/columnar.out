@@ -1,4 +1,4 @@
--- Phase 3.3-3.5: the snouttime_columnar access method. The property everything here checks is
+-- The snouttime_columnar access method. The property everything here checks is
 -- that a sealed table returns exactly what its heap twin returns, through every path: seq scan,
 -- index scan, parallel scan, after inserts, deletes, updates, rollbacks and rewrites.
 SET client_min_messages = warning;

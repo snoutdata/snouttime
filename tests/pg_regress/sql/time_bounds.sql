@@ -1,4 +1,4 @@
--- PLAN.md 3.6 (2026-09-25): `ts >= <constant> - interval '1 hour'` is a stable expression, which
+-- `ts >= <constant> - interval '1 hour'` is a stable expression, which
 -- Postgres will not prune partitions by while planning, so every partition was planned. With no
 -- days or months in the interval the sum is computed while planning; otherwise a comparison it
 -- implies in every time zone is added. Either way the answers must not change, whatever the

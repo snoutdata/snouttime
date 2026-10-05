@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN.md 1.6: a series table replicates to a plain, unpartitioned Postgres table.
+# A series table replicates to a plain, unpartitioned Postgres table.
 #
 # A publication with publish_via_partition_root says "publish this as if it were one
 # table", so the subscriber does not have to know it is partitioned at all. What this test

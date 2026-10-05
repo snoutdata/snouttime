@@ -1,4 +1,4 @@
-//! The catalog: what SnoutTime knows about the database it lives in (PLAN.md Phase 0.3).
+//! The catalog: what SnoutTime knows about the database it lives in.
 //!
 //! Five tables in the extension's own schema. Four of them are STATE and are marked with
 //! `pg_extension_config_dump`, so `pg_dump` writes their rows and a restore keeps every
@@ -7,8 +7,8 @@
 //!
 //! ## Time values are stored as a single int8 "time key"
 //!
-//! A series table's time column may be `timestamptz`, `timestamp`, `date` or an integer
-//! (PLAN.md 1.1). Everything that stores a point or a range in time here (invalidations,
+//! A series table's time column may be `timestamptz`, `timestamp`, `date` or an integer.
+//! Everything that stores a point or a range in time here (invalidations,
 //! watermarks) stores it as int8: microseconds since 2000-01-01 for the time types
 //! (Postgres's own internal representation, so the conversion is exact and cheap), and the
 //! value itself for an integer column. `series.time_type` says which reading applies.
@@ -18,7 +18,7 @@
 //! A regclass column is stored as an OID, so renaming a series table does not break its
 //! registration, and `pg_dump` writes it as the table's name, so a restore into a database
 //! where the OIDs differ resolves it again. What a regclass does NOT do is notice a DROP:
-//! cleaning up after a dropped table is an event trigger's job (PLAN.md 1.1).
+//! cleaning up after a dropped table is an event trigger's job.
 //!
 //! ## Who may write
 //!
@@ -45,7 +45,7 @@
 //! functions only (PUBLIC losing INSERT/UPDATE/DELETE) were weighed and not taken: those
 //! functions run as their caller, so they would all have to become SECURITY DEFINER, which
 //! is the design the paragraph above rejects, and a hand-written row gains its author nothing
-//! the API would not give them (reviewed 2026-10-04, PLAN.md Log).
+//! the API would not give them (reviewed 2026-10-04).
 //!
 //! `job_runs` is written only by whoever runs the jobs as a superuser (the background worker)
 //! and stays read-only to everyone else. A role that is not a superuser calling
@@ -69,12 +69,12 @@ CREATE TABLE snouttime.series (
 	premake int4 NOT NULL DEFAULT 4 CHECK (premake BETWEEN 1 AND 1000),
 	-- Optional second key: each time partition is itself hash-partitioned on this column,
 	-- which spreads one interval's writes over several tables when the series has many
-	-- distinct devices, hosts or sensors (PLAN.md 1.4).
+	-- distinct devices, hosts or sensors.
 	space_column name,
 	space_partitions int4 CHECK (space_partitions BETWEEN 2 AND 1024),
 	retention interval,
 	retention_width int8,
-	-- Sealing (PLAN.md 3.4): a partition is rewritten into the column store once its range
+	-- Sealing: a partition is rewritten into the column store once its range
 	-- ended this long ago (the settle window). NULL: never sealed by the worker.
 	seal_after interval,
 	seal_after_width int8,
@@ -82,9 +82,9 @@ CREATE TABLE snouttime.series (
 	-- Order within a column store; NULL means the space key (if any), then time.
 	seal_order_by name[],
 	-- Whether a sealed partition's non-unique indexes cover every row, or only its late rows
-	-- (PLAN.md Q5; unique indexes always cover every row).
+	-- (unique indexes always cover every row).
 	seal_keep_indexes boolean NOT NULL DEFAULT false,
-	-- Tiering (PLAN.md Phase 5): a partition goes to S3 once its range ended this long ago.
+	-- Tiering: a partition goes to S3 once its range ended this long ago.
 	tier_after interval,
 	tier_after_width int8,
 	created_at timestamptz NOT NULL DEFAULT now(),
@@ -98,7 +98,7 @@ CREATE TABLE snouttime.series (
 	CHECK ((space_column IS NULL) = (space_partitions IS NULL))
 );
 
--- A rollup (PLAN.md Phase 4): a view over materialized buckets plus the raw rows newer than
+-- A rollup: a view over materialized buckets plus the raw rows newer than
 -- the watermark. The source is a series table, or another rollup (a rollup of a rollup).
 CREATE TABLE snouttime.rollups (
 	relid regclass PRIMARY KEY,
@@ -131,7 +131,7 @@ CREATE TABLE snouttime.invalidations (
 CREATE INDEX invalidations_rollup_lo ON snouttime.invalidations (rollup, lo);
 
 -- What a table took as heap just before its first seal, so "how much did sealing save" has an
--- answer after the heap is gone (PLAN.md Phase 8). Kept through a reseal and a tier, which
+-- answer after the heap is gone. Kept through a reseal and a tier, which
 -- start from a column store; dropped by an unseal and with the table.
 CREATE TABLE snouttime.seal_sizes (
 	relid regclass PRIMARY KEY,

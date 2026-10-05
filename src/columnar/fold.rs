@@ -1,4 +1,4 @@
-//! Time bounds the planner can prune partitions by (PLAN.md 3.6, 2026-09-25).
+//! Time bounds the planner can prune partitions by (2026-09-25).
 //!
 //! `ts >= '2026-01-06 18:00+00'::timestamptz - interval '1 hour'` is the shape of nearly every
 //! time filter, and Postgres will not prune a partition by it while planning: `timestamptz -

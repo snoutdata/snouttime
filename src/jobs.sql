@@ -1,4 +1,4 @@
--- The jobs (PLAN.md Phase 1.2): making partitions ahead, emptying the default partition,
+-- The jobs: making partitions ahead, emptying the default partition,
 -- and dropping what is past its retention.
 --
 -- The background worker (worker.rs) does nothing but call `snouttime.run_due_job()` in a
@@ -200,7 +200,7 @@ BEGIN
 END
 $$;
 
--- A one-off retention (PLAN.md 1.3): drop every whole partition that ends at or before
+-- A one-off retention: drop every whole partition that ends at or before
 -- `before`, by the same rules. Returns how many it dropped.
 CREATE FUNCTION snouttime.drop_before(relation regclass, before timestamptz) RETURNS integer
 LANGUAGE plpgsql

@@ -1,4 +1,4 @@
--- SnoutTime 0.1.5 -> 0.1.6 (docs/snouttime/PLAN.md Phase 6, U1).
+-- SnoutTime 0.1.5 -> 0.1.6.
 --
 -- The seal job runs as its table's owner, and once there is nothing left to seal it asks
 -- _changed_since_seal() of every sealed partition to decide what to reseal. That was plpgsql

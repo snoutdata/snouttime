@@ -1,4 +1,4 @@
--- Rollups (PLAN.md Phase 4, D8, D9): an aggregate over time buckets of a series table, kept
+-- Rollups: an aggregate over time buckets of a series table, kept
 -- materialized by refreshing only what changed, and read through a view that is never stale.
 --
 --   snouttime.create_rollup('cpu_hourly', 'cpu', interval '1 hour',

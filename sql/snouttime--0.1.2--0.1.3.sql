@@ -1,4 +1,4 @@
--- SnoutTime 0.1.2 -> 0.1.3 (docs/snouttime/PLAN.md 3.6, TSBS's one- and eight-host queries).
+-- SnoutTime 0.1.2 -> 0.1.3 (TSBS's one- and eight-host queries).
 --
 -- Nothing in the catalog changes: 0.1.3 is in the library. A column store sealed by it is
 -- format version 3, whose integer and float chunks are cut into pages of 1,024 rows, so a seek

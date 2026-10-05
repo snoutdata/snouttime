@@ -1,4 +1,4 @@
--- What is there, and what it costs (PLAN.md Phase 1.5).
+-- What is there, and what it costs.
 --
 -- Both views read the catalogs and the planner's own statistics only. Nothing here scans a
 -- table, so asking what a series table looks like is cheap however much data it holds, and
@@ -14,7 +14,7 @@ SELECT
 	CASE
 		WHEN c.oid = snouttime._default_partition(s.relid) THEN 'default'
 		WHEN b.lo IS NULL THEN 'foreign'   -- a partition SnoutTime did not make and will not touch
-		-- rewritten into the column store (PLAN.md 3.4); with a space key, every leaf is
+		-- rewritten into the column store; with a space key, every leaf is
 		WHEN EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t WHERE snouttime._is_tiered(t.relid))
 			AND NOT EXISTS (SELECT 1 FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid
 				WHERE l.relkind = 'r' AND NOT snouttime._is_tiered(t.relid)) THEN 'tiered'

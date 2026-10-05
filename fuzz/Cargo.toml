@@ -1,4 +1,4 @@
-# Fuzz targets for every decoder of untrusted bytes (docs/snouttime/PLAN.md 3.2, R5).
+# Fuzz targets for every decoder of untrusted bytes (CONTRIBUTING.md, R5).
 # Not part of the extension's build: `bash scripts/fuzz.sh` runs them with cargo-fuzz.
 # The pure modules are compiled in by path (src/lib.rs), so nothing here links Postgres.
 [package]

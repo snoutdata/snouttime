@@ -1,4 +1,4 @@
-//! A small S3 client for tiering (PLAN.md Phase 5, D11): PUT an object from a file, GET a byte
+//! A small S3 client for tiering: PUT an object from a file, GET a byte
 //! range of one, DELETE one. Any S3-compatible endpoint (AWS, MinIO, R2), path-style URLs.
 //!
 //! Requests are signed with AWS Signature Version 4, written from AWS's published description

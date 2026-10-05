@@ -1,4 +1,4 @@
-# PLAN.md R4: every dependency must be compatible with MIT, whatever this project's own
+# CONTRIBUTING.md, R4: every dependency must be compatible with MIT, whatever this project's own
 # licence ends up being. `cargo deny check licenses` runs first in scripts/test.sh.
 [graph]
 all-features = false

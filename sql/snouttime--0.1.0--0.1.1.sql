@@ -1,4 +1,4 @@
--- SnoutTime 0.1.0 -> 0.1.1 (docs/snouttime/PLAN.md Phase 4 and Phase 6, U1).
+-- SnoutTime 0.1.0 -> 0.1.1.
 --
 -- create_rollup refuses a group_by whose columns the select list does not return: before, it
 -- built a rollup whose rows could not be told apart (group_by => 'host' with aggregates only

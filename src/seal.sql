@@ -1,5 +1,5 @@
--- Sealing (PLAN.md 3.4): rewriting old partitions into the column store, by hand or by the
--- worker, and undoing it. docs/snouttime/COLUMNAR.md §7 has the locks.
+-- Sealing: rewriting old partitions into the column store, by hand or by the
+-- worker, and undoing it.
 --
 -- A seal is `ALTER TABLE <leaf> SET ACCESS METHOD snouttime_columnar` with the series table's
 -- order and codec in force for that one statement. With a space key a time partition is
@@ -61,7 +61,7 @@ AS $$
 $$;
 
 -- Whether a seal keeps non-unique indexes whole: the series table's choice, or for a table
--- that is not a partition of one, snouttime.columnar_keep_indexes (PLAN.md Q5).
+-- that is not a partition of one, snouttime.columnar_keep_indexes.
 CREATE FUNCTION snouttime._keep_indexes(s snouttime.series) RETURNS boolean
 LANGUAGE sql STABLE
 AS $$
@@ -71,7 +71,7 @@ AS $$
 $$;
 
 -- Without the library in shared_preload_libraries, a session plans its first query before
--- SnoutTime's planner hooks exist, and the worker does not run at all (PLAN.md Q7).
+-- SnoutTime's planner hooks exist, and the worker does not run at all.
 CREATE FUNCTION snouttime._note_unless_preloaded() RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -147,7 +147,7 @@ BEGIN
 END
 $$;
 
--- Tiering (PLAN.md Phase 5, D11): the partition's column store goes to S3 as one object, and
+-- Tiering: the partition's column store goes to S3 as one object, and
 -- only its metapage and directory stay here; queries read the row groups they need from S3.
 -- Late writes and deletes still work (delta store, delete log). Returns tables rewritten.
 CREATE FUNCTION snouttime.tier(partition regclass) RETURNS integer
@@ -283,7 +283,7 @@ END
 $$;
 
 -- Rebuilds a sealed partition's column store with its delta store folded in and its deletes
--- applied (PLAN.md 3.5). Two rewrites: back to heap, then into a new column store.
+-- applied. Two rewrites: back to heap, then into a new column store.
 CREATE FUNCTION snouttime.reseal(partition regclass) RETURNS integer
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp

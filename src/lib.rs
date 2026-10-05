@@ -1,7 +1,6 @@
 //! SnoutTime: time-series storage for Postgres.
 //!
-//! The plan, the rules and the decisions referenced as `D<n>` / `R<n>` throughout this
-//! crate are in `docs/snouttime/PLAN.md`.
+//! The rules referenced as `R<n>` throughout this crate are in `CONTRIBUTING.md`.
 
 use pgrx::prelude::*;
 

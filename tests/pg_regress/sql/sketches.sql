@@ -1,4 +1,4 @@
--- Phase 2.3: percentile and distinct-count sketches. Semantics in README.md ("Sketches").
+-- Percentile and distinct-count sketches. Semantics in README.md ("Sketches").
 -- Estimates are checked against the exact answer with a bound, not printed, so the file does
 -- not depend on the last digit of a float.
 SET client_min_messages = warning;
@@ -78,7 +78,7 @@ FROM s_values;
 RESET ALL;
 SET client_min_messages = warning;
 
--- ---- refusals: a corrupt sketch is an error, never a crash (R5) ----
+-- ---- refusals: a corrupt sketch is an error, never a crash ----
 \set ON_ERROR_STOP 0
 SELECT snouttime.percentile(snouttime.percentile_sketch(v), 1.5) FROM s_values;
 SELECT snouttime.percentile_sketch(v, 5) FROM s_values;

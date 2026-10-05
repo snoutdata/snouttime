@@ -1,4 +1,4 @@
--- Phase 2.4: snouttime.window_join. Semantics in README.md ("Window join").
+-- snouttime.window_join. Semantics in README.md ("Window join").
 SET client_min_messages = warning;
 CREATE TABLE w_right AS
 SELECT 'h' || (g % 40) AS host, timestamptz '2026-01-01+00' + (g * 7) * interval '1 second' AS ts,
